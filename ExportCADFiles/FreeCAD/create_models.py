@@ -1,33 +1,36 @@
 """
 cadquery_models.py - Functions to create a few different types CadQuery models.
 
-This script demonstrates how to create CadQuery models.
+This script demonstrates how to create CadQuery models with type hints
+for better parameter handling in the GUI.
 
 Requirements:
     pip install cadquery numpy requests
 """
 
+import math
 import cadquery as cq
+from typing import Optional
 
 
-def box(boxx, boxy, boxz):
+def box(boxx: float, boxy: float, boxz: float):
     """Create a simple box
     Sample use: box(10, 20, 30)
     """
     print("Box")
     print("-" * 50)
-    
+
     # Create a box
     return cq.Workplane("XY").box(boxx, boxy, boxz)
 
 
-def bracket(basex, basey, basez, holex, holey):
+def bracket(basex: float, basey: float, basez: float, holex: float, holey: float):
     """Create a mounting bracket
     Sample use: bracket(40, 40, 5, 30, 30)
     """
     print("Mounting Bracket")
     print("-" * 50)
-    
+
     # Create a mounting bracket
     return (
         cq.Workplane("XY")
@@ -49,13 +52,13 @@ def bracket(basex, basey, basez, holex, holey):
     )
 
 
-def cylinder(radius, height):
+def cylinder(radius: float, height: float):
     """Create a cylinder
     Sample use: cylinder(20, 30)
     """
     print("Cylinder")
     print("-" * 50)
-    
+
     # Create a cylinder
     return (
         cq.Workplane("XY")
@@ -64,13 +67,13 @@ def cylinder(radius, height):
     )
 
 
-def cylinder_with_holes(radius, height, hole_radius):
+def cylinder_with_holes(radius: float, height: float, hole_radius: float):
     """Create a cylinder with holes
     Sample use: cylinder_with_holes(20, 30, 10)
     """
     print("Cylinder with Holes")
     print("-" * 50)
-    
+
     # Create a cylinder with holes
     return (
         cq.Workplane("XY")
@@ -88,13 +91,21 @@ def cylinder_with_holes(radius, height, hole_radius):
     )
 
 
-def parametric_gear(num_teeth, outer_radius, inner_radius, tooth_depth, thickness, teeth_radius):
+def parametric_gear(
+    num_teeth: int,
+    outer_radius: float,
+    inner_radius: float,
+    tooth_depth: float,
+    thickness: float,
+    teeth_radius: float,
+    center_hole: bool = True
+):
     """Create a simple parametric gear with rounded teeth
-    Sample use: parametric_gear(30, 20, 10, 3, 5, 0.5)
+    Sample use: parametric_gear(12, 20, 10, 3, 5, 0.5, True)
     """
     print("Parametric Gear")
     print("-" * 50)
-    
+
     # Create gear profile
     points = []
     import math
@@ -104,7 +115,7 @@ def parametric_gear(num_teeth, outer_radius, inner_radius, tooth_depth, thicknes
         x = radius * math.cos(angle)
         y = radius * math.sin(angle)
         points.append((x, y))
-    
+
     # Create gear base shape
     gear = (
         cq.Workplane("XY")
@@ -112,18 +123,22 @@ def parametric_gear(num_teeth, outer_radius, inner_radius, tooth_depth, thicknes
         .close()
         .extrude(thickness)
     )
-    
+
     # Apply fillet to round the teeth edges if teeth_radius > 0
     if teeth_radius > 0:
         gear = gear.edges("|Z").fillet(teeth_radius)
-    
-    # Cut center hole
-    return (
-        gear.faces(">Z")
-        .workplane()
-        .circle(inner_radius)
-        .cutThruAll()
-    )
+
+    # Cut center hole if requested
+    if center_hole:
+        gear = (
+            gear.faces(">Z")
+            .workplane()
+            .circle(inner_radius)
+            .cutThruAll()
+        )
+
+    return gear
+
 
 def loft():
     """Create a lofted shape
@@ -131,7 +146,7 @@ def loft():
     """
     print("Lofted Shape")
     print("-" * 50)
-    
+
     # Create a loft between two shapes
     return (
         cq.Workplane("XY")
@@ -142,26 +157,42 @@ def loft():
     )
 
 
-def box_with_rounded_edges_and_hole(boxx, boxy, boxz, fillet_radius, hole_radius):
-    """Create a box with rounded edges and a hole
+def box_with_rounded_edges_and_hole(
+    boxx: float,
+    boxy: float,
+    boxz: float,
+    fillet_radius: float,
+    hole_radius: Optional[float] = None
+):
+    """Create a box with rounded edges and an optional hole
     Sample use: box_with_rounded_edges_and_hole(20, 20, 10, 0.5, 3)
+    Use hole_radius=None or leave empty to create box without hole
     """
-    return (
+    result = (
         cq.Workplane("XY")
         .box(boxx, boxy, boxz)
         .edges("|Z")
         .fillet(fillet_radius)
-        .faces(">Z")
-        .workplane()
-        .hole(hole_radius)
     )
 
+    # Only add hole if hole_radius is specified
+    if hole_radius is not None:
+        result = (
+            result.faces(">Z")
+            .workplane()
+            .hole(hole_radius)
+        )
 
-def complex_part():
-    """Create a more complex part"""
+    return result
+
+
+def complex_part(add_fillets: bool = True):
+    """Create a more complex part
+    Sample use: complex_part(True)
+    """
     print("Complex Part")
     print("-" * 50)
-    
+
     # Create a complex part with multiple features
     result = (
         cq.Workplane("XY")
@@ -179,7 +210,9 @@ def complex_part():
         .workplane()
         .circle(5)
         .cutThruAll()  # Center hole through everything
-        .edges("|Z")
-        .fillet(1)  # Fillet edges
     )
+
+    if add_fillets:
+        result = result.edges("|Z").fillet(1)  # Fillet edges
+
     return result

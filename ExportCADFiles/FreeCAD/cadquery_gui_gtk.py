@@ -20,6 +20,7 @@ from pathlib import Path
 import tempfile
 import base64
 import os
+from typing import get_origin, get_args, Union
 
 # Import the model creation functions
 import create_models
@@ -74,6 +75,105 @@ class CadQueryGUI(Gtk.Window):
                 # Only include functions defined in create_models
                 if obj.__module__ == 'create_models':
                     self.functions[name] = obj
+
+    def get_type_name(self, annotation):
+        """Get a human-readable name for a type annotation"""
+        if annotation == inspect.Parameter.empty:
+            return ""
+
+        # Handle Optional types (Union with None)
+        origin = get_origin(annotation)
+        if origin is Union:
+            args = get_args(annotation)
+            # Optional[X] is Union[X, None]
+            non_none_args = [a for a in args if a is not type(None)]
+            if len(non_none_args) == 1:
+                return f"{non_none_args[0].__name__}?"  # ? indicates optional
+            return str(annotation)
+
+        if hasattr(annotation, '__name__'):
+            return annotation.__name__
+        return str(annotation)
+
+    def convert_value(self, value_str: str, annotation, param_name: str, has_default: bool):
+        """Convert a string value to the appropriate Python type based on annotation"""
+        value_str = value_str.strip()
+
+        # Handle empty string
+        if not value_str:
+            # Check if parameter has a default or is Optional
+            origin = get_origin(annotation)
+            if origin is Union:
+                args = get_args(annotation)
+                if type(None) in args:
+                    return None  # Optional parameter, empty means None
+            if has_default:
+                return None  # Will use default value
+            raise ValueError(f"Parameter '{param_name}' is required")
+
+        # Handle explicit None
+        if value_str.lower() in ('none', 'null'):
+            return None
+
+        # Handle bool (must check before int, since bool is subclass of int)
+        if annotation == bool:
+            if value_str.lower() in ('true', 'yes', '1'):
+                return True
+            elif value_str.lower() in ('false', 'no', '0'):
+                return False
+            else:
+                raise ValueError(f"Parameter '{param_name}' expects a boolean (true/false)")
+
+        # Handle int
+        if annotation == int:
+            try:
+                return int(value_str)
+            except ValueError:
+                raise ValueError(f"Parameter '{param_name}' expects an integer")
+
+        # Handle float
+        if annotation == float:
+            try:
+                return float(value_str)
+            except ValueError:
+                raise ValueError(f"Parameter '{param_name}' expects a number")
+
+        # Handle str
+        if annotation == str:
+            return value_str
+
+        # Handle Optional types
+        origin = get_origin(annotation)
+        if origin is Union:
+            args = get_args(annotation)
+            non_none_args = [a for a in args if a is not type(None)]
+            if non_none_args:
+                # Try to convert to the non-None type
+                return self.convert_value(value_str, non_none_args[0], param_name, has_default)
+
+        # No annotation or unknown type - use heuristic conversion
+        if annotation == inspect.Parameter.empty:
+            # Handle explicit None/null
+            if value_str.lower() in ('none', 'null'):
+                return None
+
+            # Handle boolean strings
+            if value_str.lower() in ('true', 'yes'):
+                return True
+            if value_str.lower() in ('false', 'no'):
+                return False
+
+            # Try numeric conversion
+            try:
+                if '.' in value_str:
+                    return float(value_str)
+                else:
+                    return int(value_str)
+            except ValueError:
+                return value_str
+
+        # Default: return as string
+        return value_str
 
     def create_widgets(self):
         """Create the GTK widgets"""
@@ -201,8 +301,16 @@ class CadQueryGUI(Gtk.Window):
         if sig.parameters:
             row = 0
             for param_name, param in sig.parameters.items():
-                # Parameter label
-                label = Gtk.Label(label=f"{param_name}:")
+                # Get type annotation for display
+                type_name = self.get_type_name(param.annotation)
+
+                # Parameter label with type hint
+                if type_name:
+                    label_text = f"{param_name} ({type_name}):"
+                else:
+                    label_text = f"{param_name}:"
+
+                label = Gtk.Label(label=label_text)
                 label.set_halign(Gtk.Align.END)
                 self.params_grid.attach(label, 0, row, 1, 1)
 
@@ -210,6 +318,10 @@ class CadQueryGUI(Gtk.Window):
                 entry = Gtk.Entry()
                 entry.set_hexpand(True)
                 entry.set_width_chars(20)
+
+                # Add placeholder text for booleans
+                if param.annotation == bool:
+                    entry.set_placeholder_text("true / false")
 
                 # Add default value if exists
                 if param.default != inspect.Parameter.empty:
@@ -246,22 +358,26 @@ class CadQueryGUI(Gtk.Window):
         sig = inspect.signature(func)
 
         try:
-            for param_name in sig.parameters.keys():
+            for param_name, param in sig.parameters.items():
                 if param_name in self.param_entries:
-                    value_str = self.param_entries[param_name].get_text().strip()
-                    if not value_str:
-                        raise ValueError(f"Parameter '{param_name}' is required")
+                    value_str = self.param_entries[param_name].get_text()
+                    has_default = param.default != inspect.Parameter.empty
 
-                    # Try to convert to appropriate type
-                    try:
-                        # Try int first, then float
-                        if '.' in value_str:
-                            params[param_name] = float(value_str)
-                        else:
-                            params[param_name] = int(value_str)
-                    except ValueError:
-                        # Keep as string if conversion fails
-                        params[param_name] = value_str
+                    # Convert value based on type annotation
+                    converted = self.convert_value(
+                        value_str,
+                        param.annotation,
+                        param_name,
+                        has_default
+                    )
+
+                    # Only add to params if we got a value (skip None for optional with defaults)
+                    if converted is not None:
+                        params[param_name] = converted
+                    elif not has_default:
+                        # Required parameter with None value - this shouldn't happen
+                        # but let's handle it
+                        params[param_name] = None
 
             # Create the model
             self.status_label.set_text(f"Creating {func_name}...")
@@ -312,24 +428,17 @@ class CadQueryGUI(Gtk.Window):
             while Gtk.events_pending():
                 Gtk.main_iteration()
 
-            try:
-                # Export model to CAD_ModelData format
-                model_filename = Path(filename).stem
-                exporter = FreeCADExporter(model, model_name=model_filename)
-                exporter.save_to_file(filename)
-                exporters.export(model, temp_step_path)
+            # Export model to CAD_ModelData format
+            model_filename = Path(filename).stem
+            exporter = FreeCADExporter(model, model_name=model_filename)
+            exporter.save_to_file(filename)
 
-                self.status_label.set_text(f"Model exported successfully to {Path(filename).name}")
-                self.show_info(
-                    "Success",
-                    f"Model created and exported!\n\n"
-                    f"JSON: {Path(filename).name}\n"
-                )
-
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_step_path):
-                    os.unlink(temp_step_path)
+            self.status_label.set_text(f"Model exported successfully to {Path(filename).name}")
+            self.show_info(
+                "Success",
+                f"Model created and exported!\n\n"
+                f"JSON: {Path(filename).name}\n"
+            )
 
         except ValueError as e:
             self.show_error("Input Error", str(e))
