@@ -24,11 +24,7 @@ from typing import get_origin, get_args, Union
 
 # Import the model creation functions
 import create_models
-
-# import freecad
-import cadquery as cq
 from cadquery_freecad_exporter import FreeCADExporter
-# from cadquery import exporters
 
 class CadQueryGUI(Gtk.Window):
     def __init__(self):

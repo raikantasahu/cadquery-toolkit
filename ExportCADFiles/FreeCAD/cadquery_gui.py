@@ -17,12 +17,7 @@ import tempfile
 
 # Import the model creation functions
 import create_models
-
-# import freecad
-import cadquery as cq
 from cadquery_freecad_exporter import FreeCADExporter
-# from cadquery import exporters
-
 
 class CadQueryGUI:
     def __init__(self, root):
