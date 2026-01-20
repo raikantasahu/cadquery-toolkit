@@ -4,10 +4,10 @@ import cadquery as cq
 from typing import Optional
 
 def box_with_rounded_edges_and_hole(
-    boxx: float,
-    boxy: float,
-    boxz: float,
-    fillet_radius: float,
+    boxx: float = 20,
+    boxy: float = 20,
+    boxz: float = 10,
+    fillet_radius: float = 0.5,
     hole_radius: Optional[float] = None
 ):
     """Create a box with rounded edges and an optional hole

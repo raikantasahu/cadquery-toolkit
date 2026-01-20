@@ -2,7 +2,7 @@
 
 import cadquery as cq
 
-def cylinder_with_holes(radius: float, height: float, hole_radius: float):
+def cylinder_with_holes(radius: float = 20, height: float = 30, hole_radius: float = 5):
     """Create a cylinder with holes
 
     Args:

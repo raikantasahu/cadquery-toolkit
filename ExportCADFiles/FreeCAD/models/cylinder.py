@@ -2,7 +2,7 @@
 
 import cadquery as cq
 
-def cylinder(radius: float, height: float):
+def cylinder(radius: float = 20, height: float = 30):
     """Create a cylinder
 
     Args:

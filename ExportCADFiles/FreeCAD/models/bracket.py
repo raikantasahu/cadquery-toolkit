@@ -2,7 +2,12 @@
 
 import cadquery as cq
 
-def bracket(basex: float, basey: float, basez: float, holex: float, holey: float):
+def bracket(
+    basex: float = 40,
+    basey: float = 40,
+    basez: float = 5,
+    holex: float = 30,
+    holey: float = 30):
     """Create a mounting bracket
 
     Args:

@@ -2,7 +2,7 @@
 
 import cadquery as cq
 
-def box(boxx: float, boxy: float, boxz: float):
+def box(boxx: float = 10, boxy: float = 20, boxz: float = 30):
     """Create a simple box
 
     Args:

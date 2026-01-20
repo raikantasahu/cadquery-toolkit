@@ -4,12 +4,12 @@ import math
 import cadquery as cq
 
 def parametric_gear(
-    num_teeth: int,
-    outer_radius: float,
-    inner_radius: float,
-    tooth_depth: float,
-    thickness: float,
-    teeth_radius: float,
+    num_teeth: int = 24,
+    outer_radius: float = 20,
+    inner_radius: float = 10,
+    tooth_depth: float = 3,
+    thickness: float = 5,
+    teeth_radius: float = 0.5,
     center_hole: bool = True
 ):
     """Create a simple parametric gear with rounded teeth
