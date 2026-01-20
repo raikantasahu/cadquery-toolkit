@@ -16,7 +16,7 @@ from pathlib import Path
 import tempfile
 
 # Import the model creation functions
-import create_models
+from models import get_all_models
 from cadquery_freecad_exporter import FreeCADExporter
 
 class CadQueryGUI:
@@ -36,13 +36,9 @@ class CadQueryGUI:
         self.create_widgets()
 
     def discover_functions(self):
-        """Discover all callable functions in create_models module"""
-        for name, obj in inspect.getmembers(create_models):
-            # Skip private functions and non-callables
-            if not name.startswith('_') and callable(obj) and inspect.isfunction(obj):
-                # Only include functions defined in create_models
-                if obj.__module__ == 'create_models':
-                    self.functions[name] = obj
+        """Discover all callable functions in models module"""
+        from models import get_all_models
+        self.functions = get_all_models()
 
     def create_widgets(self):
         """Create the GUI widgets"""
