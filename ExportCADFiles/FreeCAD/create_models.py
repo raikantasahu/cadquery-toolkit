@@ -216,3 +216,73 @@ def complex_part(add_fillets: bool = True):
         result = result.edges("|Z").fillet(1)  # Fillet edges
 
     return result
+
+def hex_bolt(
+    diameter: float = 8.0,          # M8 nominal diameter
+    length: float = 30.0,           # 30mm bolt length
+    pitch: float = 1.25,            # M8 coarse pitch
+    head_width: float = 13.0,       # M8 across-flats
+    head_height: float = 5.3,       # M8 head height
+    chamfer: Optional[bool] = True  # Add chamfers
+):
+    """
+    Create a hex bolt (without threads).
+
+    Args:
+        diameter: Major thread diameter (e.g., 8.0 for M8)
+        length: Bolt shank length (excluding head)
+        pitch: Thread pitch (used to calculate minor diameter)
+        head_width: Hex head across-flats (wrench size)
+        head_height: Height of hex head
+        chamfer: Whether to add chamfers
+
+    Returns:
+        CadQuery Workplane with the hex bolt
+    """
+
+    # Head across-corners (point to point)
+    head_across_corners = head_width / math.cos(math.radians(30))
+
+    # Thread depth for ISO metric
+    thread_depth = 0.5413 * pitch
+    minor_diameter = diameter - 2 * thread_depth
+
+    # =========================================
+    # Step 1: Create the hex head
+    # =========================================
+    head = (
+        cq.Workplane("XY")
+        .polygon(6, head_across_corners)
+        .extrude(head_height)
+    )
+
+    # Add chamfer to top of head
+    if chamfer:
+        chamfer_size = min(head_height * 0.2, 1.0)
+        head = head.faces(">Z").chamfer(chamfer_size)
+        head = head.faces("<Z").chamfer(0.3)
+
+    # =========================================
+    # Step 2: Create the shank (minor diameter to suggest threads)
+    # =========================================
+    bolt = head
+
+    shank = (
+        cq.Workplane("XY")
+        .workplane(offset=-length)
+        .circle(minor_diameter / 2)
+        .extrude(length)
+    )
+    bolt = bolt.union(shank)
+
+    # =========================================
+    # Step 4: Add tip chamfer
+    # =========================================
+    if chamfer:
+        tip_chamfer = min(diameter * 0.3, pitch)
+        try:
+            bolt = bolt.faces("<Z").chamfer(tip_chamfer)
+        except:
+            pass
+
+    return bolt
