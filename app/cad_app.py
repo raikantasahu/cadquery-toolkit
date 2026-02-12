@@ -17,8 +17,10 @@ from gi.repository import Gtk, Gdk, Pango
 from pathlib import Path
 
 from exporter import HAS_CADQUERY, HAS_FREECAD
+from mesher import HAS_GMSH, create_mesh, save_mesh
+from dialogs import ask_save_mesh_file, ask_export_file, ask_mesh_settings
 from widgets import ModelBuilder
-from viewer import ModelViewer
+from viewer import ModelViewer, show_mesh
 
 
 class CadQueryApp(Gtk.Window):
@@ -28,6 +30,16 @@ class CadQueryApp(Gtk.Window):
         super().__init__(title="CadQuery Model Studio")
         self.set_default_size(700, 600)
         self.set_border_width(10)
+
+        # Application icon
+        icon_path = Path(__file__).parent / "images" / "parametric_gear.png"
+        if icon_path.exists():
+            self.set_icon_from_file(str(icon_path))
+
+        # Mesh state
+        self._current_mesh = None
+        self._current_mesh_stats = None
+        self.connect("destroy", self._on_destroy)
 
         # Check dependencies
         if not HAS_CADQUERY:
@@ -71,10 +83,30 @@ class CadQueryApp(Gtk.Window):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
+    def _create_menu_bar(self) -> Gtk.MenuBar:
+        """Load the menu bar from ui/window.ui via Gtk.Builder"""
+        ui_path = Path(__file__).parent / "ui" / "window.ui"
+        builder = Gtk.Builder()
+        builder.add_from_file(str(ui_path))
+        builder.connect_signals(self)
+
+        # Keep references to menu items for sensitivity control
+        self.menu_view = builder.get_object("menu_view")
+        self.menu_export = builder.get_object("menu_export")
+        self.menu_create_mesh = builder.get_object("menu_create_mesh")
+        self.menu_view_mesh = builder.get_object("menu_view_mesh")
+        self.menu_save_mesh = builder.get_object("menu_save_mesh")
+
+        return builder.get_object("menubar")
+
     def _create_widgets(self) -> None:
         """Create the main UI"""
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.add(vbox)
+
+        # Menu bar (loaded from ui/window.ui)
+        menubar = self._create_menu_bar()
+        vbox.pack_start(menubar, False, False, 0)
 
         # Header
         title_label = Gtk.Label()
@@ -85,8 +117,9 @@ class CadQueryApp(Gtk.Window):
         # Model Builder widget
         self.model_builder = ModelBuilder()
         self.model_builder.connect('view-requested', self._on_view_requested)
-        self.model_builder.connect('export-requested', self._on_export_requested)
         self.model_builder.connect('status-changed', self._on_status_changed)
+        self.model_builder.connect('params-changed', self._on_params_changed)
+        self.model_builder.function_combo.connect('changed', self._on_model_type_changed)
         vbox.pack_start(self.model_builder, True, True, 0)
 
         # Status bar
@@ -127,6 +160,7 @@ class CadQueryApp(Gtk.Window):
 
         # Disable controls while viewer is open
         self.model_builder.set_sensitive_controls(False)
+        self._set_menu_sensitive(False)
         self.status_label.set_text("Viewer open - close viewer window to continue")
 
         # Show viewer (blocking)
@@ -135,76 +169,40 @@ class CadQueryApp(Gtk.Window):
     def _on_viewer_error(self, message: str) -> None:
         """Handle viewer error"""
         self.model_builder.set_sensitive_controls(True)
+        self._set_menu_sensitive(True)
         self._show_error("Viewer Error", message)
         self.status_label.set_text("Error: Viewer failed")
 
     def _on_viewer_closed(self) -> None:
         """Called when viewer window is closed"""
         self.model_builder.set_sensitive_controls(True)
+        self._set_menu_sensitive(True)
         self.present()
         self.status_label.set_text("Viewer closed. Ready to continue.")
 
-    def _on_export_requested(self, builder, model, exporter) -> None:
-        """Handle export request from ModelBuilder"""
-        # File chooser dialog
-        dialog = Gtk.FileChooserDialog(
-            title="Export CAD Model",
-            parent=self,
-            action=Gtk.FileChooserAction.SAVE
-        )
-        dialog.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_SAVE, Gtk.ResponseType.OK
-        )
+    # --- Menu callbacks ---
 
-        # File filters
-        filter_json = Gtk.FileFilter()
-        filter_json.set_name("JSON files (*.json)")
-        filter_json.add_pattern("*.json")
-        dialog.add_filter(filter_json)
+    def _on_menu_view(self, menuitem) -> None:
+        """Handle Model > View menu activation"""
+        self.model_builder.view_button.clicked()
 
-        filter_step = Gtk.FileFilter()
-        filter_step.set_name("STEP files (*.step, *.stp)")
-        filter_step.add_pattern("*.step")
-        filter_step.add_pattern("*.stp")
-        dialog.add_filter(filter_step)
+    def _on_menu_export(self, menuitem) -> None:
+        """Handle Model > Export menu activation"""
+        if not self.model_builder.build_model():
+            return
 
-        filter_all = Gtk.FileFilter()
-        filter_all.set_name("All supported formats")
-        filter_all.add_pattern("*.json")
-        filter_all.add_pattern("*.step")
-        filter_all.add_pattern("*.stp")
-        dialog.add_filter(filter_all)
+        model_name = self.model_builder.get_selected_model_name() or "model"
+        exporter = self.model_builder.get_current_exporter()
+        result = ask_export_file(self, model_name)
 
-        dialog.set_do_overwrite_confirmation(True)
-
-        model_name = builder.get_selected_model_name() or "model"
-        dialog.set_current_name(f"{model_name}.step")
-
-        response = dialog.run()
-        filename = dialog.get_filename()
-        selected_filter = dialog.get_filter()
-        dialog.destroy()
-
-        if response != Gtk.ResponseType.OK or not filename:
+        if result is None:
             self.status_label.set_text("Export cancelled")
             return
 
-        # Determine format from extension or filter
-        is_step = filename.lower().endswith(('.step', '.stp'))
-        is_json = filename.lower().endswith('.json')
-
-        # Add extension if missing based on selected filter
-        if not is_step and not is_json:
-            if selected_filter == filter_step:
-                filename += '.step'
-                is_step = True
-            else:
-                filename += '.json'
-                is_json = True
+        filename, fmt = result
 
         try:
-            if is_step:
+            if fmt == "step":
                 exporter.save_to_step(filename)
             else:
                 exporter.save_to_file(filename)
@@ -214,9 +212,146 @@ class CadQueryApp(Gtk.Window):
             self._show_error("Export Error", f"Failed to export:\n{str(e)}")
             self.status_label.set_text("Error: Export failed")
 
+    def _on_menu_create_mesh(self, menuitem) -> None:
+        """Handle Mesh > Create Mesh menu activation"""
+        if not HAS_GMSH:
+            self._show_error(
+                "Missing Dependency",
+                "Gmsh is not installed.\nRun: pip install gmsh"
+            )
+            return
+
+        # Show mesh settings dialog
+        mesh_config = ask_mesh_settings(self)
+        if mesh_config is None:
+            self.status_label.set_text("Mesh creation cancelled")
+            return
+
+        if not self.model_builder.build_model():
+            return
+
+        # Finalize any previously held mesh
+        self._finalize_current_mesh()
+
+        model = self.model_builder.get_current_model()
+        model_name = self.model_builder.get_selected_model_name() or "model"
+
+        self.status_label.set_text("Generating mesh...")
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+
+        try:
+            mesh, stats = create_mesh(
+                model, mesh_config['mesh_type'], mesh_config['element_size'],
+                model_name=model_name,
+            )
+        except Exception as e:
+            self._show_error("Mesh Error", f"Failed to generate mesh:\n{str(e)}")
+            self.status_label.set_text("Error: Mesh generation failed")
+            return
+
+        self._current_mesh = mesh
+        self._current_mesh_stats = stats
+        self._update_mesh_menu_sensitivity()
+
+        summary = (
+            f"Nodes: {stats['node_count']}, "
+            f"Elements: {stats['element_count']}, "
+            f"Types: {stats['element_types']}"
+        )
+        self.status_label.set_text(f"Mesh created — {summary}")
+
+    def _on_menu_view_mesh(self, menuitem) -> None:
+        """Handle Mesh > View Mesh menu activation"""
+        if self._current_mesh is None:
+            return
+
+        ugrid = self._current_mesh.get_pyvista_mesh()
+
+        self.model_builder.set_sensitive_controls(False)
+        self._set_menu_sensitive(False)
+        self.status_label.set_text("Mesh viewer open - close viewer window to continue")
+
+        if not show_mesh(ugrid, on_closed=self._on_viewer_closed, on_error=self._on_viewer_error):
+            self.model_builder.set_sensitive_controls(True)
+            self._set_menu_sensitive(True)
+            self.status_label.set_text("Error: Failed to load mesh")
+
+    def _on_menu_save_mesh(self, menuitem) -> None:
+        """Handle Mesh > Save Mesh menu activation"""
+        if self._current_mesh is None:
+            return
+
+        model_name = self.model_builder.get_selected_model_name() or "model"
+        filename = ask_save_mesh_file(self, model_name)
+        if filename is None:
+            self.status_label.set_text("Mesh save cancelled")
+            return
+
+        try:
+            save_mesh(self._current_mesh, filename)
+        except Exception as e:
+            self._show_error("Mesh Error", f"Failed to save mesh:\n{str(e)}")
+            self.status_label.set_text("Error: Mesh save failed")
+            return
+
+        # save_mesh finalizes gmsh, so clear state
+        self._current_mesh = None
+        self._current_mesh_stats = None
+        self._update_mesh_menu_sensitivity()
+
+        self.status_label.set_text(f"Mesh saved to {Path(filename).name}")
+
+    # --- Menu helper methods ---
+
+    def _finalize_current_mesh(self) -> None:
+        """Finalize the stored mesh if one exists"""
+        if self._current_mesh is not None:
+            self._current_mesh.finalize()
+            self._current_mesh = None
+            self._current_mesh_stats = None
+
+    def _update_mesh_menu_sensitivity(self) -> None:
+        """Update View Mesh / Save Mesh sensitivity based on stored mesh"""
+        has_mesh = self._current_mesh is not None
+        self.menu_view_mesh.set_sensitive(has_mesh)
+        self.menu_save_mesh.set_sensitive(has_mesh)
+
+    def _set_menu_sensitive(self, sensitive: bool) -> None:
+        """Enable/disable all menu items, respecting model/mesh state"""
+        has_model = self.model_builder.get_selected_model_name() is not None
+        has_mesh = self._current_mesh is not None
+        self.menu_view.set_sensitive(sensitive and has_model)
+        self.menu_export.set_sensitive(sensitive and has_model)
+        self.menu_create_mesh.set_sensitive(sensitive and has_model)
+        self.menu_view_mesh.set_sensitive(sensitive and has_mesh)
+        self.menu_save_mesh.set_sensitive(sensitive and has_mesh)
+
+    def _on_params_changed(self, builder) -> None:
+        """Clear stored mesh when model parameters change"""
+        self._finalize_current_mesh()
+        self._update_mesh_menu_sensitivity()
+
+    def _on_model_type_changed(self, combo) -> None:
+        """Clear stored mesh when model type selection changes"""
+        self._finalize_current_mesh()
+        self._update_mesh_menu_sensitivity()
+
+    def _on_destroy(self, window) -> None:
+        """Clean up mesh resources on window destroy"""
+        self._finalize_current_mesh()
+
     def _on_status_changed(self, builder, message: str) -> None:
         """Handle status change from ModelBuilder"""
         self.status_label.set_text(message)
+        # Sync menu sensitivity with builder state
+        has_model = self.model_builder.get_selected_model_name() is not None
+        has_mesh = self._current_mesh is not None
+        self.menu_view.set_sensitive(has_model)
+        self.menu_export.set_sensitive(has_model)
+        self.menu_create_mesh.set_sensitive(has_model)
+        self.menu_view_mesh.set_sensitive(has_mesh)
+        self.menu_save_mesh.set_sensitive(has_mesh)
 
     def _show_info(self, title: str, message: str) -> None:
         """Show info dialog"""
@@ -241,6 +376,9 @@ class CadQueryApp(Gtk.Window):
             text=title
         )
         dialog.format_secondary_text(message)
+        for label in dialog.get_message_area().get_children():
+            if isinstance(label, Gtk.Label):
+                label.set_selectable(True)
         dialog.run()
         dialog.destroy()
 

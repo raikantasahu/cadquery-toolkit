@@ -44,6 +44,7 @@ class ModelViewer(GObject.Object):
 
     # Default styling
     DEFAULT_COLOR = '#667eea'
+    VOLUMETRIC_COLOR = '#4fc3f7'
     BACKGROUND_COLOR = '#1a1a1a'
 
     def __init__(self):
@@ -61,6 +62,7 @@ class ModelViewer(GObject.Object):
         # State
         self._wireframe_enabled = False
         self._is_open = False
+        self._is_volumetric = False
 
     # =========================================================================
     # Mesh Loading
@@ -100,6 +102,39 @@ class ModelViewer(GObject.Object):
             return True
         except Exception as e:
             self.emit('error', f"Failed to create mesh: {str(e)}")
+            return False
+
+    def set_mesh_from_pyvista(self, mesh) -> bool:
+        """
+        Load mesh from a PyVista dataset (PolyData or UnstructuredGrid).
+
+        Args:
+            mesh: A PyVista PolyData or UnstructuredGrid object.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            self._mesh = mesh
+            self._is_volumetric = isinstance(mesh, pv.UnstructuredGrid)
+
+            bounds = mesh.bounds
+            self._mesh_center = np.array([
+                (bounds[0] + bounds[1]) / 2,
+                (bounds[2] + bounds[3]) / 2,
+                (bounds[4] + bounds[5]) / 2
+            ])
+            self._mesh_size = max(
+                bounds[1] - bounds[0],
+                bounds[3] - bounds[2],
+                bounds[5] - bounds[4]
+            )
+
+            info = self.get_mesh_info()
+            self.emit('mesh-loaded', info)
+            return True
+        except Exception as e:
+            self.emit('error', f"Failed to set mesh: {str(e)}")
             return False
 
     def _create_mesh_from_dict(self, data: Dict[str, Any]) -> None:
@@ -184,15 +219,26 @@ class ModelViewer(GObject.Object):
             self._plotter.set_background(self.BACKGROUND_COLOR)
 
             # Add mesh
-            self._actor = self._plotter.add_mesh(
-                self._mesh,
-                color=self.DEFAULT_COLOR,
-                show_edges=False,
-                lighting=True,
-                smooth_shading=True,
-                specular=0.5,
-                specular_power=30
-            )
+            if self._is_volumetric:
+                self._actor = self._plotter.add_mesh(
+                    self._mesh,
+                    color=self.VOLUMETRIC_COLOR,
+                    show_edges=True,
+                    edge_color='#333333',
+                    opacity=1.0,
+                    smooth_shading=False,
+                    lighting=True,
+                )
+            else:
+                self._actor = self._plotter.add_mesh(
+                    self._mesh,
+                    color=self.DEFAULT_COLOR,
+                    show_edges=False,
+                    lighting=True,
+                    smooth_shading=True,
+                    specular=0.5,
+                    specular_power=30
+                )
 
             # Add grid floor
             self._add_grid()
@@ -391,3 +437,4 @@ class ModelViewer(GObject.Object):
         self._mesh_center = np.array([0.0, 0.0, 0.0])
         self._mesh_size = 1.0
         self._wireframe_enabled = False
+        self._is_volumetric = False

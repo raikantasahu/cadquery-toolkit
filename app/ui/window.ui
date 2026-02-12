@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk+" version="3.20"/>
+
+  <object class="GtkMenuBar" id="menubar">
+    <!-- Model menu -->
+    <child>
+      <object class="GtkMenuItem" id="model_menu_item">
+        <property name="label">Model</property>
+        <child type="submenu">
+          <object class="GtkMenu" id="model_menu">
+            <child>
+              <object class="GtkMenuItem" id="menu_view">
+                <property name="label">View</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_view"/>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_export">
+                <property name="label">Export</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_export"/>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Mesh menu -->
+    <child>
+      <object class="GtkMenuItem" id="mesh_menu_item">
+        <property name="label">Mesh</property>
+        <child type="submenu">
+          <object class="GtkMenu" id="mesh_menu">
+            <child>
+              <object class="GtkMenuItem" id="menu_create_mesh">
+                <property name="label">Create Mesh</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_create_mesh"/>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_view_mesh">
+                <property name="label">View Mesh</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_view_mesh"/>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_save_mesh">
+                <property name="label">Save Mesh</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_save_mesh"/>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

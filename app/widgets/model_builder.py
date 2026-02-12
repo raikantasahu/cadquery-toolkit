@@ -10,7 +10,6 @@ Usage:
     builder = ModelBuilder()
     builder.connect('model-built', on_model_built)
     builder.connect('view-requested', on_view_requested)
-    builder.connect('export-requested', on_export_requested)
 """
 
 import gi
@@ -30,8 +29,6 @@ class ModelBuilder(Gtk.Box):
             Args: model (CadQuery object), exporter (FreeCADExporter)
         view-requested: Emitted when user clicks View Model
             Args: model, exporter
-        export-requested: Emitted when user clicks Export
-            Args: model, exporter
         status-changed: Emitted when status message changes
             Args: message (str)
     """
@@ -41,8 +38,8 @@ class ModelBuilder(Gtk.Box):
     __gsignals__ = {
         'model-built': (GObject.SignalFlags.RUN_FIRST, None, (object, object)),
         'view-requested': (GObject.SignalFlags.RUN_FIRST, None, (object, object)),
-        'export-requested': (GObject.SignalFlags.RUN_FIRST, None, (object, object)),
         'status-changed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        'params-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, model_functions: Optional[Dict[str, Callable]] = None):
@@ -140,13 +137,6 @@ class ModelBuilder(Gtk.Box):
         self.view_button.set_sensitive(False)
         self.view_button.set_size_request(150, -1)
         button_box.pack_start(self.view_button, False, False, 0)
-
-        # Export button
-        self.export_button = Gtk.Button(label="Export")
-        self.export_button.connect("clicked", self._on_export_clicked)
-        self.export_button.set_sensitive(False)
-        self.export_button.set_size_request(150, -1)
-        button_box.pack_start(self.export_button, False, False, 0)
 
         # Clear button
         self.clear_button = Gtk.Button(label="Clear")
@@ -279,6 +269,7 @@ class ModelBuilder(Gtk.Box):
 
                 # Connect Enter key to view action
                 entry.connect("activate", lambda w: self._on_view_clicked(None))
+                entry.connect("changed", lambda w: self.emit('params-changed'))
 
                 self.params_grid.attach(entry, 1, row, 1, 1)
                 self.param_entries[param_name] = entry
@@ -291,7 +282,6 @@ class ModelBuilder(Gtk.Box):
             self.params_grid.show_all()
 
         self.view_button.set_sensitive(True)
-        self.export_button.set_sensitive(True)
         self._emit_status(f"Configure parameters for {func_name}")
 
     def _build_model(self) -> bool:
@@ -357,11 +347,6 @@ class ModelBuilder(Gtk.Box):
         if self._build_model():
             self.emit('view-requested', self.current_model, self.current_exporter)
 
-    def _on_export_clicked(self, button) -> None:
-        """Handle Export button click"""
-        if self._build_model():
-            self.emit('export-requested', self.current_model, self.current_exporter)
-
     def _on_clear_clicked(self, button) -> None:
         """Handle Clear button click"""
         self.clear()
@@ -385,14 +370,17 @@ class ModelBuilder(Gtk.Box):
         self.current_exporter = None
 
         self.view_button.set_sensitive(False)
-        self.export_button.set_sensitive(False)
         self._emit_status("Select a model type to begin")
+
+    def build_model(self) -> bool:
+        """Public wrapper around _build_model(). Returns True on success."""
+        return self._build_model()
 
     def set_sensitive_controls(self, sensitive: bool) -> None:
         """Enable or disable all controls"""
+        has_model = self.function_combo.get_active_text() is not None
         self.function_combo.set_sensitive(sensitive)
-        self.view_button.set_sensitive(sensitive and self.function_combo.get_active_text() is not None)
-        self.export_button.set_sensitive(sensitive and self.function_combo.get_active_text() is not None)
+        self.view_button.set_sensitive(sensitive and has_model)
         self.clear_button.set_sensitive(sensitive)
         self.params_grid.set_sensitive(sensitive)
 

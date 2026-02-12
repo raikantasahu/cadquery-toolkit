@@ -91,6 +91,7 @@ dmypy.json
 *.stp
 *.iges
 *.igs
+*.msh
 
 # Generated JSON model files (keep sample_model.json)
 !sample_model.json
