@@ -44,6 +44,19 @@ def ask_save_mesh_file(parent, default_name):
     filter_all.add_pattern("*.json")
     dialog.add_filter(filter_all)
 
+    _EXT_FOR_FILTER = {id(filter_msh): ".msh", id(filter_json): ".json"}
+
+    def _on_filter_changed(dlg, _pspec):
+        new_ext = _EXT_FOR_FILTER.get(id(dlg.get_filter()))
+        if new_ext is None:
+            return
+        name = dlg.get_current_name() or ""
+        stem, _, _ = name.rpartition(".")
+        if stem:
+            dlg.set_current_name(stem + new_ext)
+
+    dialog.connect("notify::filter", _on_filter_changed)
+
     dialog.set_do_overwrite_confirmation(True)
     dialog.set_current_name(f"{default_name}.msh")
 
