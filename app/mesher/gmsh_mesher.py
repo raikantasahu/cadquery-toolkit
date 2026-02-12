@@ -18,6 +18,7 @@ Usage:
 """
 
 import enum
+import json
 import tempfile
 import os
 
@@ -36,6 +37,14 @@ _GMSH_TO_VTK = {
     5: 12,   # 8-node hexahedron
     6: 13,   # 6-node wedge (prism)
     7: 14,   # 5-node pyramid
+}
+
+# Gmsh element type codes to JSON element type names (3D elements only)
+_GMSH_TO_NAME = {
+    4: "tet4",
+    5: "hex8",
+    6: "wedge6",
+    7: "pyramid5",
 }
 
 
@@ -73,13 +82,24 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model"):
 
 
 def save_mesh(mesher, filename):
-    """Save a generated mesh to a .msh file and finalize Gmsh.
+    """Save a generated mesh to a .msh file.
 
     Args:
         mesher: A GmshMesher instance returned by create_mesh().
         filename: Output file path (should end with .msh).
     """
     mesher.save(filename)
+
+
+def save_mesh_json(mesher, filename, title=None):
+    """Save a generated mesh to a JSON file.
+
+    Args:
+        mesher: A GmshMesher instance returned by create_mesh().
+        filename: Output file path (should end with .json).
+        title: Optional title for the mesh data.
+    """
+    mesher.save_as_json(filename, title=title)
 
 
 def generate_pyvista_mesh(model, mesh_type_str, element_size,
@@ -200,18 +220,86 @@ class GmshMesher:
 
     def save(self, filename: str) -> None:
         """
-        Write the generated mesh to a .msh file and finalize Gmsh.
+        Write the generated mesh to a .msh file.
+
+        Does NOT finalize Gmsh — the mesh stays available for further
+        saves or viewing. Call finalize() when done.
 
         Args:
             filename: Output file path (should end with .msh).
         """
         if not self._initialized:
             raise RuntimeError("No mesh generated yet. Call generate() first.")
-        try:
-            gmsh.write(filename)
-        finally:
-            gmsh.finalize()
-            self._initialized = False
+        gmsh.write(filename)
+
+    def save_as_json(self, filename: str, title: str = None) -> None:
+        """
+        Write the generated mesh to a JSON file.
+
+        Output structure matches the cantilever_beam.json format:
+        nodes as {id: [x, y, z]}, elements with type/material, and
+        a default isotropic material entry.
+
+        Does NOT finalize Gmsh.
+
+        Args:
+            filename: Output file path (should end with .json).
+            title: Optional title string. Defaults to the model name.
+        """
+        if not self._initialized:
+            raise RuntimeError("No mesh generated yet. Call generate() first.")
+
+        # Nodes
+        node_tags, coords, _ = gmsh.model.mesh.getNodes()
+        nodes = {}
+        for i, tag in enumerate(node_tags):
+            x, y, z = coords[3 * i], coords[3 * i + 1], coords[3 * i + 2]
+            nodes[str(int(tag))] = [float(x), float(y), float(z)]
+
+        # 3D elements
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
+        elements = []
+        elem_id = 1
+        for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
+            type_name = _GMSH_TO_NAME.get(int(etype))
+            if type_name is None:
+                continue
+            props = gmsh.model.mesh.getElementProperties(int(etype))
+            nodes_per_elem = props[3]
+            num_elems = len(enodes) // nodes_per_elem
+            for i in range(num_elems):
+                start = i * nodes_per_elem
+                end = start + nodes_per_elem
+                element_nodes = [int(n) for n in enodes[start:end]]
+                elements.append({
+                    "id": elem_id,
+                    "type": type_name,
+                    "nodes": element_nodes,
+                    "material": 1,
+                })
+                elem_id += 1
+
+        with open(filename, "w") as f:
+            f.write("{\n")
+            f.write(f'  "title": {json.dumps(title or self.model_name)},\n')
+
+            f.write('  "nodes": {\n')
+            node_items = list(nodes.items())
+            for i, (nid, coords) in enumerate(node_items):
+                comma = "," if i < len(node_items) - 1 else ""
+                f.write(f"    {json.dumps(nid)}: {json.dumps(coords)}{comma}\n")
+            f.write("  },\n")
+
+            f.write('  "elements": [\n')
+            for i, elem in enumerate(elements):
+                comma = "," if i < len(elements) - 1 else ""
+                f.write(f"    {json.dumps(elem)}{comma}\n")
+            f.write("  ],\n")
+
+            f.write('  "materials": [\n')
+            f.write('    {"id": 1, "type": "isotropic", "E": 200e9, "nu": 0.3}\n')
+            f.write("  ]\n")
+            f.write("}\n")
 
     def _import_geometry(self) -> None:
         """Export CadQuery object to a temporary STEP file and import into Gmsh."""

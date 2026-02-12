@@ -8,14 +8,15 @@ from gi.repository import Gtk
 
 
 def ask_save_mesh_file(parent, default_name):
-    """Show a save dialog for .msh mesh files.
+    """Show a save dialog for mesh files (Gmsh or JSON).
 
     Args:
         parent: Parent GTK window.
         default_name: Default filename stem (without extension).
 
     Returns:
-        Filepath string with .msh extension, or None if cancelled.
+        Tuple of (filepath, format) where format is "msh" or "json",
+        or None if cancelled.
     """
     dialog = Gtk.FileChooserDialog(
         title="Save Mesh File",
@@ -32,20 +33,41 @@ def ask_save_mesh_file(parent, default_name):
     filter_msh.add_pattern("*.msh")
     dialog.add_filter(filter_msh)
 
+    filter_json = Gtk.FileFilter()
+    filter_json.set_name("JSON files (*.json)")
+    filter_json.add_pattern("*.json")
+    dialog.add_filter(filter_json)
+
+    filter_all = Gtk.FileFilter()
+    filter_all.set_name("All supported formats")
+    filter_all.add_pattern("*.msh")
+    filter_all.add_pattern("*.json")
+    dialog.add_filter(filter_all)
+
     dialog.set_do_overwrite_confirmation(True)
     dialog.set_current_name(f"{default_name}.msh")
 
     response = dialog.run()
     filename = dialog.get_filename()
+    selected_filter = dialog.get_filter()
     dialog.destroy()
 
     if response != Gtk.ResponseType.OK or not filename:
         return None
 
-    if not filename.lower().endswith('.msh'):
-        filename += '.msh'
+    is_msh = filename.lower().endswith('.msh')
+    is_json = filename.lower().endswith('.json')
 
-    return filename
+    if not is_msh and not is_json:
+        if selected_filter == filter_json:
+            filename += '.json'
+            is_json = True
+        else:
+            filename += '.msh'
+            is_msh = True
+
+    fmt = "json" if is_json else "msh"
+    return (filename, fmt)
 
 
 def ask_export_file(parent, default_name):

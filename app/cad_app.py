@@ -17,7 +17,7 @@ from gi.repository import Gtk, Gdk, Pango
 from pathlib import Path
 
 from exporter import HAS_CADQUERY, HAS_FREECAD
-from mesher import HAS_GMSH, create_mesh, save_mesh
+from mesher import HAS_GMSH, create_mesh, save_mesh, save_mesh_json
 from dialogs import ask_save_mesh_file, ask_export_file, ask_mesh_settings
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
@@ -283,22 +283,22 @@ class CadQueryApp(Gtk.Window):
             return
 
         model_name = self.model_builder.get_selected_model_name() or "model"
-        filename = ask_save_mesh_file(self, model_name)
-        if filename is None:
+        result = ask_save_mesh_file(self, model_name)
+        if result is None:
             self.status_label.set_text("Mesh save cancelled")
             return
 
+        filename, fmt = result
+
         try:
-            save_mesh(self._current_mesh, filename)
+            if fmt == "json":
+                save_mesh_json(self._current_mesh, filename, title=model_name)
+            else:
+                save_mesh(self._current_mesh, filename)
         except Exception as e:
             self._show_error("Mesh Error", f"Failed to save mesh:\n{str(e)}")
             self.status_label.set_text("Error: Mesh save failed")
             return
-
-        # save_mesh finalizes gmsh, so clear state
-        self._current_mesh = None
-        self._current_mesh_stats = None
-        self._update_mesh_menu_sensitivity()
 
         self.status_label.set_text(f"Mesh saved to {Path(filename).name}")
 
