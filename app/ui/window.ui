@@ -55,6 +55,13 @@
                 <signal name="activate" handler="_on_menu_save_mesh"/>
               </object>
             </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_show_stats">
+                <property name="label">Show Stats</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_show_stats"/>
+              </object>
+            </child>
           </object>
         </child>
       </object>

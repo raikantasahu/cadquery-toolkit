@@ -162,7 +162,7 @@ class GmshMesher:
 
         gmsh.model.mesh.generate(3)
 
-        return self._collect_mesh_info()
+        return self._collect_mesh_info(mesh_type)
 
     def get_pyvista_mesh(self) -> pv.UnstructuredGrid:
         """
@@ -326,23 +326,40 @@ class GmshMesher:
         if mesh_type == MeshType.TET4:
             # Default Delaunay tetrahedral meshing, no recombination
             gmsh.option.setNumber("Mesh.RecombineAll", 0)
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 0)
         elif mesh_type == MeshType.HEX8:
             gmsh.option.setNumber("Mesh.RecombineAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DLevel", 2)
+            # Subdivide tets into hexes to guarantee all-hex output
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
         elif mesh_type == MeshType.MIXED:
             gmsh.option.setNumber("Mesh.RecombineAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DLevel", 0)
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 0)
 
-    def _collect_mesh_info(self) -> dict:
-        """Collect and return mesh statistics."""
+    def _collect_mesh_info(self, mesh_type: MeshType = None) -> dict:
+        """Collect and return mesh statistics (3D elements only).
+
+        Args:
+            mesh_type: The requested mesh type, used to detect whether the
+                expected element type was actually produced.
+        """
         node_tags, _, _ = gmsh.model.mesh.getNodes()
-        element_types, _, _ = gmsh.model.mesh.getElements()
+        element_types, _, _ = gmsh.model.mesh.getElements(dim=3)
 
-        # Map Gmsh element type codes to names
+        # Expected gmsh element type codes per mesh type
+        _expected_codes = {
+            MeshType.TET4: {4},
+            MeshType.HEX8: {5},
+            MeshType.MIXED: {4, 5, 6, 7},
+        }
+        expected = _expected_codes.get(mesh_type, set())
+
         type_names = []
         total_elements = 0
+        found_expected = False
         for etype in element_types:
             name, _, _, num_nodes, _, _ = gmsh.model.mesh.getElementProperties(etype)
             # Count elements of this type across all entities
@@ -350,9 +367,19 @@ class GmshMesher:
             count = len(tags)
             total_elements += count
             type_names.append(f"{name} ({count})")
+            if int(etype) in expected:
+                found_expected = True
 
-        return {
+        stats = {
             "node_count": len(node_tags),
             "element_count": total_elements,
-            "element_types": ", ".join(type_names),
+            "element_types": ", ".join(type_names) if type_names else "None",
         }
+
+        if mesh_type and expected and not found_expected and total_elements > 0:
+            stats["warning"] = (
+                f"Requested {mesh_type.value} elements but none were produced. "
+                f"Got: {stats['element_types']}"
+            )
+
+        return stats

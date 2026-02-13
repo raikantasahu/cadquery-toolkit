@@ -96,6 +96,7 @@ class CadQueryApp(Gtk.Window):
         self.menu_create_mesh = builder.get_object("menu_create_mesh")
         self.menu_view_mesh = builder.get_object("menu_view_mesh")
         self.menu_save_mesh = builder.get_object("menu_save_mesh")
+        self.menu_show_stats = builder.get_object("menu_show_stats")
 
         return builder.get_object("menubar")
 
@@ -261,6 +262,9 @@ class CadQueryApp(Gtk.Window):
         )
         self.status_label.set_text(f"Mesh created — {summary}")
 
+        if "warning" in stats:
+            self._show_error("Mesh Warning", stats["warning"])
+
     def _on_menu_view_mesh(self, menuitem) -> None:
         """Handle Mesh > View Mesh menu activation"""
         if self._current_mesh is None:
@@ -302,6 +306,51 @@ class CadQueryApp(Gtk.Window):
 
         self.status_label.set_text(f"Mesh saved to {Path(filename).name}")
 
+    def _on_menu_show_stats(self, menuitem) -> None:
+        """Handle Mesh > Show Stats menu activation"""
+        stats = self._current_mesh_stats
+        if stats is None:
+            return
+
+        dialog = Gtk.Dialog(
+            title="Mesh Statistics",
+            transient_for=self,
+            flags=0,
+        )
+        dialog.add_button("_Close", Gtk.ResponseType.CLOSE)
+
+        grid = Gtk.Grid()
+        grid.set_column_spacing(20)
+        grid.set_row_spacing(8)
+        grid.set_margin_top(15)
+        grid.set_margin_bottom(15)
+        grid.set_margin_start(20)
+        grid.set_margin_end(20)
+
+        rows = [
+            ("Nodes", str(stats['node_count'])),
+            ("Elements", str(stats['element_count'])),
+            ("Element Types", str(stats['element_types'])),
+        ]
+        if "warning" in stats:
+            rows.append(("Warning", stats["warning"]))
+
+        for i, (prop, value) in enumerate(rows):
+            prop_label = Gtk.Label(label=prop)
+            prop_label.set_halign(Gtk.Align.START)
+            prop_label.set_markup(f"<b>{prop}</b>")
+            grid.attach(prop_label, 0, i, 1, 1)
+
+            val_label = Gtk.Label(label=value)
+            val_label.set_halign(Gtk.Align.START)
+            val_label.set_selectable(True)
+            grid.attach(val_label, 1, i, 1, 1)
+
+        dialog.get_content_area().add(grid)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
     # --- Menu helper methods ---
 
     def _finalize_current_mesh(self) -> None:
@@ -316,6 +365,7 @@ class CadQueryApp(Gtk.Window):
         has_mesh = self._current_mesh is not None
         self.menu_view_mesh.set_sensitive(has_mesh)
         self.menu_save_mesh.set_sensitive(has_mesh)
+        self.menu_show_stats.set_sensitive(has_mesh)
 
     def _set_menu_sensitive(self, sensitive: bool) -> None:
         """Enable/disable all menu items, respecting model/mesh state"""
@@ -326,6 +376,7 @@ class CadQueryApp(Gtk.Window):
         self.menu_create_mesh.set_sensitive(sensitive and has_model)
         self.menu_view_mesh.set_sensitive(sensitive and has_mesh)
         self.menu_save_mesh.set_sensitive(sensitive and has_mesh)
+        self.menu_show_stats.set_sensitive(sensitive and has_mesh)
 
     def _on_params_changed(self, builder) -> None:
         """Clear stored mesh when model parameters change"""
@@ -352,6 +403,7 @@ class CadQueryApp(Gtk.Window):
         self.menu_create_mesh.set_sensitive(has_model)
         self.menu_view_mesh.set_sensitive(has_mesh)
         self.menu_save_mesh.set_sensitive(has_mesh)
+        self.menu_show_stats.set_sensitive(has_mesh)
 
     def _show_info(self, title: str, message: str) -> None:
         """Show info dialog"""
