@@ -7,6 +7,55 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
 
+def ask_open_file(parent=None):
+    """Show an open dialog for model/mesh files.
+
+    Args:
+        parent: Optional parent GTK window.
+
+    Returns:
+        Filepath string, or None if cancelled.
+    """
+    dialog = Gtk.FileChooserDialog(
+        title="Select a model or mesh file",
+        parent=parent,
+        action=Gtk.FileChooserAction.OPEN,
+    )
+    dialog.add_buttons(
+        Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+        Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
+    )
+
+    filter_all = Gtk.FileFilter()
+    filter_all.set_name("All supported formats")
+    for pattern in ("*.json", "*.msh", "*.step", "*.stp"):
+        filter_all.add_pattern(pattern)
+    dialog.add_filter(filter_all)
+
+    for name, patterns in [
+        ("JSON files (*.json)", ["*.json"]),
+        ("Gmsh mesh (*.msh)", ["*.msh"]),
+        ("STEP files (*.step, *.stp)", ["*.step", "*.stp"]),
+    ]:
+        f = Gtk.FileFilter()
+        f.set_name(name)
+        for p in patterns:
+            f.add_pattern(p)
+        dialog.add_filter(f)
+
+    response = dialog.run()
+    path = dialog.get_filename()
+    dialog.destroy()
+
+    # Drain pending GTK events so the dialog window fully closes
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    if response != Gtk.ResponseType.OK or not path:
+        return None
+    return path
+
+
 def ask_save_mesh_file(parent, default_name):
     """Show a save dialog for mesh files (Gmsh or JSON).
 

@@ -13,6 +13,7 @@ Usage:
     python visualize.py mesh.json
     python visualize.py mesh.msh
     python visualize.py part.step
+    python visualize.py              # opens a file selection dialog
 """
 
 import argparse
@@ -21,6 +22,7 @@ import sys
 
 import gmsh
 
+from dialogs import ask_open_file
 from exporter import export_cadquery_model
 from mesher import gmsh_to_pyvista, mesh_json_to_pyvista
 from viewer import create_polydata_from_model_data, show_pyvista
@@ -69,11 +71,17 @@ def main():
         description="Visualize a CAD model or mesh file.",
     )
     parser.add_argument(
-        'file', help="Path to a .json, .msh, .step, or .stp file",
+        'file', nargs='?', default=None,
+        help="Path to a .json, .msh, .step, or .stp file (opens dialog if omitted)",
     )
     args = parser.parse_args()
 
-    mesh, title, volumetric = load_file(args.file)
+    path = args.file or ask_open_file()
+    if not path:
+        print("No file selected.")
+        sys.exit(0)
+
+    mesh, title, volumetric = load_file(path)
     show_pyvista(mesh, title=title, volumetric=volumetric)
 
 
