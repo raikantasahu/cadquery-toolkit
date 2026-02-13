@@ -10,6 +10,8 @@ from .gmsh_mesher import (
     save_mesh,
     save_mesh_json,
     generate_pyvista_mesh,
+    gmsh_to_pyvista,
+    mesh_json_to_pyvista,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     'save_mesh',
     'save_mesh_json',
     'generate_pyvista_mesh',
+    'gmsh_to_pyvista',
+    'mesh_json_to_pyvista',
 ]

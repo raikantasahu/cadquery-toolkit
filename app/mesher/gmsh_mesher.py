@@ -68,6 +68,44 @@ _GMSH_TO_NAME = {
 }
 
 
+# Reverse mapping: JSON element type name → VTK cell type
+_NAME_TO_VTK = {name: _GMSH_TO_VTK[code] for code, name in _GMSH_TO_NAME.items()}
+
+
+def mesh_json_to_pyvista(data: dict) -> pv.UnstructuredGrid:
+    """Convert a mesh JSON dict (nodes/elements) to a PyVista UnstructuredGrid.
+
+    This is the reader counterpart of ``GmshMesher.save_as_json``.
+
+    Args:
+        data: Dict with 'nodes' mapping node-id strings to [x,y,z] and
+              'elements' listing dicts with 'type' and 'nodes' keys.
+
+    Returns:
+        pv.UnstructuredGrid containing the volumetric mesh.
+    """
+    raw_nodes = data['nodes']
+    node_ids = sorted(raw_nodes.keys(), key=lambda k: int(k))
+    tag_to_index = {nid: idx for idx, nid in enumerate(node_ids)}
+    points = np.array([raw_nodes[nid] for nid in node_ids], dtype=np.float64)
+
+    cells = []
+    celltypes = []
+    for elem in data['elements']:
+        vtk_type = _NAME_TO_VTK.get(elem['type'])
+        if vtk_type is None:
+            continue
+        indices = [tag_to_index[str(n)] for n in elem['nodes']]
+        cells.append(len(indices))
+        cells.extend(indices)
+        celltypes.append(vtk_type)
+
+    cells = np.array(cells, dtype=np.int64)
+    celltypes = np.array(celltypes, dtype=np.uint8)
+
+    return pv.UnstructuredGrid(cells, celltypes, points)
+
+
 class MeshType(enum.Enum):
     """Supported volumetric mesh element types."""
     TET4 = "tet4"
@@ -124,6 +162,56 @@ def save_mesh_json(mesher, filename, title=None):
         title: Optional title for the mesh data.
     """
     mesher.save_as_json(filename, title=title)
+
+
+def gmsh_to_pyvista() -> pv.UnstructuredGrid:
+    """Extract the current Gmsh model mesh as a PyVista UnstructuredGrid.
+
+    Reads nodes and 3D elements from the active Gmsh session, maps Gmsh
+    element types to VTK cell types, and applies node reordering where
+    needed (hex20/hex27).
+
+    Must be called while Gmsh is initialized and a mesh has been generated
+    or loaded (before ``gmsh.finalize()``).
+
+    Returns:
+        pv.UnstructuredGrid containing the volumetric mesh.
+    """
+    node_tags, coords, _ = gmsh.model.mesh.getNodes()
+    coords = np.array(coords).reshape(-1, 3)
+
+    tag_to_index = {int(tag): idx for idx, tag in enumerate(node_tags)}
+
+    elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
+
+    cells = []
+    celltypes = []
+
+    for etype, node_tags_per_type in zip(elem_types, elem_node_tags):
+        vtk_type = _GMSH_TO_VTK.get(int(etype))
+        if vtk_type is None:
+            continue
+
+        props = gmsh.model.mesh.getElementProperties(int(etype))
+        nodes_per_elem = props[3]
+        node_order = _GMSH_TO_VTK_NODE_ORDER.get(int(etype))
+
+        node_arr = np.array(node_tags_per_type, dtype=np.int64)
+        num_elems = len(node_arr) // nodes_per_elem
+
+        for i in range(num_elems):
+            elem_nodes = node_arr[i * nodes_per_elem:(i + 1) * nodes_per_elem]
+            indices = [tag_to_index[int(t)] for t in elem_nodes]
+            if node_order is not None:
+                indices = [indices[j] for j in node_order]
+            cells.append(len(indices))
+            cells.extend(indices)
+            celltypes.append(vtk_type)
+
+    cells = np.array(cells, dtype=np.int64)
+    celltypes = np.array(celltypes, dtype=np.uint8)
+
+    return pv.UnstructuredGrid(cells, celltypes, coords)
 
 
 def generate_pyvista_mesh(model, mesh_type_str, element_size,
@@ -200,44 +288,7 @@ class GmshMesher:
         if not self._initialized:
             raise RuntimeError("No mesh generated yet. Call generate() first.")
 
-        # Get all nodes
-        node_tags, coords, _ = gmsh.model.mesh.getNodes()
-        coords = np.array(coords).reshape(-1, 3)
-
-        # Build node-tag-to-index mapping (gmsh tags can be non-contiguous)
-        tag_to_index = {int(tag): idx for idx, tag in enumerate(node_tags)}
-
-        # Get 3D elements only
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
-
-        cells = []
-        celltypes = []
-
-        for etype, node_tags_per_type in zip(elem_types, elem_node_tags):
-            vtk_type = _GMSH_TO_VTK.get(int(etype))
-            if vtk_type is None:
-                continue
-
-            props = gmsh.model.mesh.getElementProperties(int(etype))
-            nodes_per_elem = props[3]
-            node_order = _GMSH_TO_VTK_NODE_ORDER.get(int(etype))
-
-            node_arr = np.array(node_tags_per_type, dtype=np.int64)
-            num_elems = len(node_arr) // nodes_per_elem
-
-            for i in range(num_elems):
-                elem_nodes = node_arr[i * nodes_per_elem:(i + 1) * nodes_per_elem]
-                indices = [tag_to_index[int(t)] for t in elem_nodes]
-                if node_order is not None:
-                    indices = [indices[j] for j in node_order]
-                cells.append(len(indices))
-                cells.extend(indices)
-                celltypes.append(vtk_type)
-
-        cells = np.array(cells, dtype=np.int64)
-        celltypes = np.array(celltypes, dtype=np.uint8)
-
-        return pv.UnstructuredGrid(cells, celltypes, coords)
+        return gmsh_to_pyvista()
 
     def finalize(self) -> None:
         """Finalize Gmsh without saving. Use for view-only flows."""
