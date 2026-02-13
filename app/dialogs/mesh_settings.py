@@ -63,8 +63,10 @@ def ask_mesh_settings(parent):
 
     mesh_type_combo = Gtk.ComboBoxText()
     mesh_type_combo.append_text("tet4")
+    mesh_type_combo.append_text("tet10")
     mesh_type_combo.append_text("hex8")
-    mesh_type_combo.append_text("mixed")
+    mesh_type_combo.append_text("hex20")
+    mesh_type_combo.append_text("hex27")
     mesh_type_combo.set_active(0)
     type_box.pack_start(mesh_type_combo, True, True, 0)
 

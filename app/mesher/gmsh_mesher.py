@@ -2,7 +2,8 @@
 gmsh_mesher.py - Volumetric mesh generation using Gmsh
 
 Generates 3D (volumetric) meshes from CadQuery models using the Gmsh
-meshing engine. Supports tetrahedral, hexahedral, and mixed element types.
+meshing engine. Supports first- and second-order tetrahedral and
+hexahedral element types.
 
 Requirements:
     pip install gmsh>=4.11.0
@@ -37,6 +38,22 @@ _GMSH_TO_VTK = {
     5: 12,   # 8-node hexahedron
     6: 13,   # 6-node wedge (prism)
     7: 14,   # 5-node pyramid
+    11: 24,  # 10-node tetrahedron (second order)
+    17: 25,  # 20-node hexahedron (second order, serendipity)
+    12: 29,  # 27-node hexahedron (second order, complete)
+}
+
+# Gmsh-to-VTK node reordering for second-order hex elements.
+# Gmsh and VTK number mid-edge and mid-face nodes differently.
+# Only element types that need reordering are listed here.
+_GMSH_TO_VTK_NODE_ORDER = {
+    # 20-node hex: corners identical, mid-edge nodes reordered
+    17: [0, 1, 2, 3, 4, 5, 6, 7,
+         8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15],
+    # 27-node hex: same mid-edge reorder, plus mid-face nodes reordered
+    12: [0, 1, 2, 3, 4, 5, 6, 7,
+         8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15,
+         22, 23, 21, 24, 20, 25, 26],
 }
 
 # Gmsh element type codes to JSON element type names (3D elements only)
@@ -45,20 +62,27 @@ _GMSH_TO_NAME = {
     5: "hex8",
     6: "wedge6",
     7: "pyramid5",
+    11: "tet10",
+    17: "hex20",
+    12: "hex27",
 }
 
 
 class MeshType(enum.Enum):
     """Supported volumetric mesh element types."""
     TET4 = "tet4"
+    TET10 = "tet10"
     HEX8 = "hex8"
-    MIXED = "mixed"
+    HEX20 = "hex20"
+    HEX27 = "hex27"
 
 
 _MESH_TYPE_MAP = {
     "tet4": MeshType.TET4,
+    "tet10": MeshType.TET10,
     "hex8": MeshType.HEX8,
-    "mixed": MeshType.MIXED,
+    "hex20": MeshType.HEX20,
+    "hex27": MeshType.HEX27,
 }
 
 
@@ -67,7 +91,7 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model"):
 
     Args:
         model: A CadQuery Workplane result.
-        mesh_type_str: Mesh type key ("tet4", "hex8", or "mixed").
+        mesh_type_str: Mesh type key ("tet4", "tet10", "hex8", "hex20", or "hex27").
         element_size: Target element size.
         model_name: Name used for the Gmsh model.
 
@@ -108,7 +132,7 @@ def generate_pyvista_mesh(model, mesh_type_str, element_size,
 
     Args:
         model: A CadQuery Workplane result.
-        mesh_type_str: Mesh type key ("tet4", "hex8", or "mixed").
+        mesh_type_str: Mesh type key ("tet4", "tet10", "hex8", "hex20", or "hex27").
         element_size: Target element size.
         model_name: Name used for the Gmsh model.
 
@@ -145,7 +169,7 @@ class GmshMesher:
         Generate a volumetric mesh.
 
         Args:
-            mesh_type: Element type (TET4, HEX8, or MIXED).
+            mesh_type: Element type (TET4, TET10, HEX8, HEX20, or HEX27).
             element_size: Target element size.
 
         Returns:
@@ -196,6 +220,7 @@ class GmshMesher:
 
             props = gmsh.model.mesh.getElementProperties(int(etype))
             nodes_per_elem = props[3]
+            node_order = _GMSH_TO_VTK_NODE_ORDER.get(int(etype))
 
             node_arr = np.array(node_tags_per_type, dtype=np.int64)
             num_elems = len(node_arr) // nodes_per_elem
@@ -203,6 +228,8 @@ class GmshMesher:
             for i in range(num_elems):
                 elem_nodes = node_arr[i * nodes_per_elem:(i + 1) * nodes_per_elem]
                 indices = [tag_to_index[int(t)] for t in elem_nodes]
+                if node_order is not None:
+                    indices = [indices[j] for j in node_order]
                 cells.append(len(indices))
                 cells.extend(indices)
                 celltypes.append(vtk_type)
@@ -327,17 +354,39 @@ class GmshMesher:
             # Default Delaunay tetrahedral meshing, no recombination
             gmsh.option.setNumber("Mesh.RecombineAll", 0)
             gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 0)
+            gmsh.option.setNumber("Mesh.ElementOrder", 1)
+            gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
+        elif mesh_type == MeshType.TET10:
+            # Second-order tetrahedral meshing (10-node tets)
+            gmsh.option.setNumber("Mesh.RecombineAll", 0)
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 0)
+            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
         elif mesh_type == MeshType.HEX8:
             gmsh.option.setNumber("Mesh.RecombineAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DLevel", 2)
             # Subdivide tets into hexes to guarantee all-hex output
             gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
-        elif mesh_type == MeshType.MIXED:
+            gmsh.option.setNumber("Mesh.ElementOrder", 1)
+            gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
+        elif mesh_type == MeshType.HEX20:
+            # Second-order serendipity hexahedral meshing (20-node hexes)
             gmsh.option.setNumber("Mesh.RecombineAll", 1)
             gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
-            gmsh.option.setNumber("Mesh.Recombine3DLevel", 0)
-            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 0)
+            gmsh.option.setNumber("Mesh.Recombine3DLevel", 2)
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            # Serendipity: drop face/body center nodes (27-node → 20-node)
+            gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 1)
+        elif mesh_type == MeshType.HEX27:
+            # Second-order complete hexahedral meshing (27-node hexes)
+            gmsh.option.setNumber("Mesh.RecombineAll", 1)
+            gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
+            gmsh.option.setNumber("Mesh.Recombine3DLevel", 2)
+            gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
 
     def _collect_mesh_info(self, mesh_type: MeshType = None) -> dict:
         """Collect and return mesh statistics (3D elements only).
@@ -352,8 +401,10 @@ class GmshMesher:
         # Expected gmsh element type codes per mesh type
         _expected_codes = {
             MeshType.TET4: {4},
+            MeshType.TET10: {11},
             MeshType.HEX8: {5},
-            MeshType.MIXED: {4, 5, 6, 7},
+            MeshType.HEX20: {17},
+            MeshType.HEX27: {12},
         }
         expected = _expected_codes.get(mesh_type, set())
 
