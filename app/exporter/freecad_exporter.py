@@ -26,6 +26,7 @@ Usage:
     exporter.save_to_file("mybox.json")
 """
 
+import inspect
 import json
 import os
 import tempfile
@@ -71,16 +72,18 @@ class FreeCADExporter:
     Exports CadQuery models to CAD_ModelData JSON format using FreeCAD
     """
     
-    def __init__(self, 
+    def __init__(self,
                  cadquery_object: Any,
                  model_name: str = "CadQuery Model",
                  cad_name: str = "CadQuery",
                  length_unit: str = "mm",
                  mass_unit: str = "kg",
-                 angle_unit: str = "degrees"):
+                 angle_unit: str = "degrees",
+                 parameters: Optional[Dict[str, Any]] = None,
+                 param_signature: Optional[inspect.Signature] = None):
         """
         Initialize exporter with a CadQuery object
-        
+
         Args:
             cadquery_object: CadQuery Workplane or shape
             model_name: Name for the model
@@ -88,19 +91,23 @@ class FreeCADExporter:
             length_unit: Length units (default: "mm")
             mass_unit: Mass units (default: "kg")
             angle_unit: Angle units (default: "degrees")
+            parameters: Build parameters {name: value}
+            param_signature: Function signature for type info
         """
         if not HAS_CADQUERY:
             raise ImportError("CadQuery is required. Install with: conda install -c conda-forge cadquery")
-        
+
         if not HAS_FREECAD:
             raise ImportError("FreeCAD is required. See installation instructions above.")
-        
+
         self.cq_object = cadquery_object
         self.model_name = model_name
         self.cad_name = cad_name
         self.length_unit = length_unit
         self.mass_unit = mass_unit
         self.angle_unit = angle_unit
+        self.parameters = parameters or {}
+        self.param_signature = param_signature
         
         # Storage for extracted geometry
         self.vertices_map = {}  # Map of vertex coords -> index
@@ -369,10 +376,38 @@ class FreeCADExporter:
             "boundingBox": bounding_box
         }
     
+    def _build_parameter_list(self) -> List[Dict[str, Any]]:
+        """Convert stored build parameters to parameterList format"""
+        from model.cad_modeldata import ParameterType
+
+        _TYPE_MAP = {
+            float: ParameterType.PARAMETER_REAL,
+            int: ParameterType.PARAMETER_INTEGER,
+            str: ParameterType.PARAMETER_STRING,
+        }
+
+        result = []
+        for name, value in self.parameters.items():
+            # Determine type from signature annotation, fall back to runtime type
+            param_type = ParameterType.PARAMETER_UNKNOWN
+            if self.param_signature and name in self.param_signature.parameters:
+                ann = self.param_signature.parameters[name].annotation
+                if ann != inspect.Parameter.empty:
+                    param_type = _TYPE_MAP.get(ann, ParameterType.PARAMETER_UNKNOWN)
+            if param_type == ParameterType.PARAMETER_UNKNOWN:
+                param_type = _TYPE_MAP.get(type(value), ParameterType.PARAMETER_UNKNOWN)
+
+            result.append({
+                "type": int(param_type),
+                "name": name,
+                "value": str(value),
+            })
+        return result
+
     def export(self) -> Dict[str, Any]:
         """
         Export the CadQuery model to CAD_ModelData format
-        
+
         Returns:
             Dictionary in CAD_ModelData format
         """
@@ -416,7 +451,7 @@ class FreeCADExporter:
             "faceList": self.faces_list,
             "volumeList": self.volumes_list,
             "bodyList": self.bodies_list,
-            "parameterList": []
+            "parameterList": self._build_parameter_list()
         }
         
         return model_data

@@ -57,6 +57,8 @@ class ModelBuilder(Gtk.Box):
         self.param_entries = {}
         self.current_model = None
         self.current_exporter = None
+        self.current_build_params = {}
+        self.current_build_sig = None
 
         # Load models if not provided
         if not self.functions:
@@ -322,6 +324,8 @@ class ModelBuilder(Gtk.Box):
                 Gtk.main_iteration()
 
             self.current_model = func(**params)
+            self.current_build_params = params
+            self.current_build_sig = sig
 
             # Create exporter
             self._emit_status("Processing geometry...")
@@ -329,7 +333,12 @@ class ModelBuilder(Gtk.Box):
                 Gtk.main_iteration()
 
             from exporter import FreeCADExporter
-            self.current_exporter = FreeCADExporter(self.current_model, model_name=func_name)
+            self.current_exporter = FreeCADExporter(
+                self.current_model,
+                model_name=func_name,
+                parameters=params,
+                param_signature=sig,
+            )
 
             self._emit_status(f"Model '{func_name}' built successfully")
             self.emit('model-built', self.current_model, self.current_exporter)
@@ -368,6 +377,8 @@ class ModelBuilder(Gtk.Box):
 
         self.current_model = None
         self.current_exporter = None
+        self.current_build_params = {}
+        self.current_build_sig = None
 
         self.view_button.set_sensitive(False)
         self._emit_status("Select a model type to begin")
@@ -395,3 +406,7 @@ class ModelBuilder(Gtk.Box):
     def get_current_exporter(self):
         """Get the current exporter (or None)"""
         return self.current_exporter
+
+    def get_current_build_params(self) -> dict:
+        """Get the parameters used for the last build"""
+        return self.current_build_params
