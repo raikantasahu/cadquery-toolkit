@@ -169,9 +169,36 @@ class FreeCADExporter:
         vertex_hash = self._hash_vertex(vertex)
         return self.vertices_map.get(vertex_hash, -1)
     
+    def _hash_edge(self, edge) -> str:
+        """Create unique hash for an edge based on its endpoint and midpoint coordinates.
+        Endpoints are sorted so that reversed edge orientations produce the same hash."""
+        try:
+            start = edge.firstVertex()
+            end = edge.lastVertex()
+        except AttributeError:
+            start = edge.Vertexes[0]
+            end = edge.Vertexes[-1]
+
+        sh = self._hash_vertex(start)
+        eh = self._hash_vertex(end)
+        pair = tuple(sorted([sh, eh]))
+
+        # Include midpoint to distinguish edges with same endpoints (e.g. two arcs)
+        try:
+            u_mid = (edge.FirstParameter + edge.LastParameter) / 2
+            mid = edge.Curve.value(u_mid)
+            mid_coords = (round(mid.x, 6), round(mid.y, 6), round(mid.z, 6))
+        except Exception:
+            mid_coords = ()
+
+        return hashlib.md5(str((*pair, mid_coords)).encode()).hexdigest()[:16]
+
     def _extract_edges(self) -> None:
         """Extract all edges from the shape"""
+        self._edge_index_map: Dict[str, int] = {}
         for edge_index, edge in enumerate(self.freecad_shape.Edges):
+            self._edge_index_map[self._hash_edge(edge)] = edge_index
+
             # Get start and end vertices
             try:
                 start_vertex = edge.firstVertex()
@@ -184,28 +211,19 @@ class FreeCADExporter:
                 except:
                     # Skip this edge if we can't get vertices
                     continue
-            
+
             start_idx = self._get_vertex_index(start_vertex)
             end_idx = self._get_vertex_index(end_vertex)
-            
+
             # Sample points along the edge
             vertex_locations = []
-            
+
             try:
-                # Discretize the edge into points
-                num_points = 10
-                curve = edge.Curve
-                
-                # Get parameter range
-                u_min = edge.FirstParameter
-                u_max = edge.LastParameter
-                
-                # Sample points
-                for i in range(num_points + 1):
-                    u = u_min + (u_max - u_min) * i / num_points
-                    pnt = curve.value(u)
+                # Discretize the edge using deflection tolerance
+                points = edge.discretize(Deflection=0.05)
+                for pnt in points:
                     vertex_locations.extend([pnt.x, pnt.y, pnt.z])
-                    
+
             except:
                 # Fallback: use start and end points
                 try:
@@ -218,7 +236,7 @@ class FreeCADExporter:
                 except:
                     # Last resort - empty locations
                     vertex_locations = [0, 0, 0, 0, 0, 0]
-            
+
             self.edges_list.append({
                 "persistentID": f"E{edge_index}",
                 "start": start_idx,
@@ -265,12 +283,12 @@ class FreeCADExporter:
                     # Last resort - approximate from triangulation
                     area = 0.0
             
-            # Get edges for this face
+            # Get global edge indices for this face
             edge_list = []
             for edge in face.Edges:
-                # Find matching edge in edges_list
-                # Simplified - just use sequential indices
-                edge_list.append(len(edge_list))
+                edge_idx = self._edge_index_map.get(self._hash_edge(edge), -1)
+                if edge_idx >= 0:
+                    edge_list.append(edge_idx)
             
             # Triangulate the face
             vertex_locations, connectivity = self._triangulate_face(face)
