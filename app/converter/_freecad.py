@@ -7,10 +7,10 @@ the resulting OCCT topology to pull out unique vertices, edges, tessellated
 faces, volumes, and bodies — plus mass properties (volume, center of mass,
 moments of inertia, bounding box).
 
-The output is a dict of plain dicts that mirror the CAD_ModelData entity
+The output is a dict of plain dicts that mirror the CADModelData entity
 field names (camelCase). The public converter functions in
 `converter.converter` are responsible for repackaging those dicts into
-typed CAD_ModelData / Vertex / Edge / Face / Volume / Body instances.
+typed CADModelData / Vertex / Edge / Face / Volume / Body instances.
 
 There is no public API here. Use `converter.part_to_modeldata` instead.
 """
@@ -49,7 +49,7 @@ except ImportError:
 class _FreeCADShape:
     """
     A FreeCAD-loaded copy of a CadQuery shape, with operations to walk its
-    topology and produce CAD_ModelData-shaped dicts.
+    topology and produce CADModelData-shaped dicts.
 
     Construct with a CadQuery object (Workplane or Shape) and call
     `extract()` to get a dict containing `vertices`, `edges`, `faces`,
@@ -370,7 +370,7 @@ def build_parameter_dicts(
     param_signature: Optional[inspect.Signature],
 ) -> List[Dict[str, Any]]:
     """Convert (parameters, signature) into the list shape used by ParameterList."""
-    from model.cad_modeldata import ParameterType
+    from model.CADModelData import ParameterType
 
     type_map = {
         float: ParameterType.PARAMETER_REAL,

@@ -5,7 +5,7 @@ This package provides data classes for representing CAD geometry
 in a format compatible with the C# CADModelData class.
 """
 
-from .cad_modeldata import (
+from .CADModelData import (
     # Enums
     ModelType,
     EntityType,
@@ -22,7 +22,7 @@ from .cad_modeldata import (
     CoordinateSystem,
     Component,
     # Main model class
-    CAD_ModelData,
+    CADModelData,
 )
 
 __all__ = [
@@ -39,5 +39,5 @@ __all__ = [
     'Axis',
     'CoordinateSystem',
     'Component',
-    'CAD_ModelData',
+    'CADModelData',
 ]

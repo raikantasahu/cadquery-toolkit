@@ -1,11 +1,11 @@
 """
-converter.converter - Public CadQuery → CAD_ModelData conversion functions.
+converter.converter - Public CadQuery → CADModelData conversion functions.
 
 Three entry points:
 
-    part_to_modeldata(cq_object, ...)     -> CAD_ModelData (PART)
-    assembly_to_modeldata(cq_assembly, ...) -> CAD_ModelData (ASSEMBLY)
-    to_modeldata(thing, ...)              -> CAD_ModelData (type-dispatching)
+    part_to_modeldata(cq_object, ...)     -> CADModelData (PART)
+    assembly_to_modeldata(cq_assembly, ...) -> CADModelData (ASSEMBLY)
+    to_modeldata(thing, ...)              -> CADModelData (type-dispatching)
 
 Internally, per-Part conversion uses the FreeCAD-bound geometry walker in
 `converter._freecad`. The assembly walk is pure-Python and does identity-based
@@ -18,9 +18,9 @@ from typing import Any, Dict, List, Optional, Union
 
 import cadquery as cq
 
-from model.cad_modeldata import (
+from model.CADModelData import (
     Body,
-    CAD_ModelData,
+    CADModelData,
     Component,
     Edge,
     Face,
@@ -80,9 +80,9 @@ def part_to_modeldata(
     angle_unit: str = "degrees",
     parameters: Optional[Dict[str, Any]] = None,
     param_signature: Optional[inspect.Signature] = None,
-) -> CAD_ModelData:
+) -> CADModelData:
     """
-    Convert a single CadQuery part (Workplane or Shape) to a CAD_ModelData.
+    Convert a single CadQuery part (Workplane or Shape) to a CADModelData.
 
     The geometry is reported in the shape's local frame. Per-instance
     placement (rotation/translation) is the caller's responsibility — it
@@ -93,7 +93,7 @@ def part_to_modeldata(
     extracted = _FreeCADShape(shape).extract()
     properties = extracted["properties"]
 
-    return CAD_ModelData(
+    return CADModelData(
         CadName=cad_name,
         ModelName=name,
         ComponentName=name,
@@ -165,17 +165,17 @@ def assembly_to_modeldata(
     length_unit: str = "mm",
     mass_unit: str = "kg",
     angle_unit: str = "degrees",
-) -> CAD_ModelData:
+) -> CADModelData:
     """
-    Convert a cq.Assembly to a CAD_ModelData (ASSEMBLY).
+    Convert a cq.Assembly to a CADModelData (ASSEMBLY).
 
-    Each direct child of `cq_assembly` becomes a PART CAD_ModelData (geometry
+    Each direct child of `cq_assembly` becomes a PART CADModelData (geometry
     in the child's local frame). The returned root holds one Component per
     child with the per-instance transform on `Component.TransformToParent`.
 
     Identity-based deduplication: if the same Python object instance is used
     as the geometry of multiple children, it is converted to a single PART
-    CAD_ModelData and referenced by multiple Components. Two separately
+    CADModelData and referenced by multiple Components. Two separately
     constructed but geometrically identical shapes (e.g. two fresh
     `hex_bolt(...)` calls) will NOT be deduped — that would require content
     hashing of the BRep, which is out of scope.
@@ -184,7 +184,7 @@ def assembly_to_modeldata(
     is supported. Nested sub-assemblies are flagged.
     """
     name = cq_assembly.name or "assembly"
-    cache: Dict[int, CAD_ModelData] = {}
+    cache: Dict[int, CADModelData] = {}
     components: List[Component] = []
 
     for child in cq_assembly.children:
@@ -216,7 +216,7 @@ def assembly_to_modeldata(
             )
         )
 
-    return CAD_ModelData(
+    return CADModelData(
         CadName=cad_name,
         ModelName=name,
         ComponentName=name,
@@ -236,9 +236,9 @@ def assembly_to_modeldata(
 def to_modeldata(
     thing: Union[cq.Assembly, cq.Workplane, cq.Shape],
     **kwargs: Any,
-) -> CAD_ModelData:
+) -> CADModelData:
     """
-    Convert any CadQuery thing (Assembly, Workplane, Shape) to a CAD_ModelData.
+    Convert any CadQuery thing (Assembly, Workplane, Shape) to a CADModelData.
 
     Dispatches by type:
       - cq.Assembly → assembly_to_modeldata

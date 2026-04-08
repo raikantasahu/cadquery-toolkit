@@ -1,5 +1,5 @@
 """
-CAD_ModelData - Data model for CAD geometry representation.
+CADModelData - Data model for CAD geometry representation.
 
 This module mirrors the C# class `RSA.Model.CADModelData` (see
 RSA.Applications/Model/src/CADModelData.cs) and its JSON wire format
@@ -284,8 +284,8 @@ class Component:
     into the parent's frame, plus a reference to the child model itself.
     """
     TransformToParent: List[float] = field(default_factory=_identity_matrix)
-    ChildModelData: "CAD_ModelData" = field(
-        default_factory=lambda: CAD_ModelData()
+    ChildModelData: "CADModelData" = field(
+        default_factory=lambda: CADModelData()
     )
 
     def __post_init__(self):
@@ -296,11 +296,11 @@ class Component:
 
 
 # =============================================================================
-# Main CAD_ModelData class
+# Main CADModelData class
 # =============================================================================
 
 @dataclass
-class CAD_ModelData:
+class CADModelData:
     """
     Complete CAD model data structure mirroring the C# CADModelData class.
 
@@ -327,7 +327,7 @@ class CAD_ModelData:
         ChildComponents — list of Component placements (only used when
         ModelTypeValue == ASSEMBLY).
 
-    Note: There is no `TransformToParent` on CAD_ModelData itself — a model's
+    Note: There is no `TransformToParent` on CADModelData itself — a model's
     placement is held on the parent's `Component` wrapper.
     """
 
@@ -406,7 +406,7 @@ class CAD_ModelData:
         identity_map: Dict[int, int] = {}
         entries: List[Optional[Dict[str, Any]]] = []
 
-        def collect(model: "CAD_ModelData") -> int:
+        def collect(model: "CADModelData") -> int:
             key = id(model)
             if key in identity_map:
                 return identity_map[key]
@@ -479,16 +479,16 @@ class CAD_ModelData:
         """Save to a JSON file in the C# envelope format."""
         with open(filepath, "w") as f:
             f.write(self.to_json(indent=indent))
-        print(f"Saved CAD_ModelData to: {filepath}")
+        print(f"Saved CADModelData to: {filepath}")
 
     # ------------------------------------------------------------------
     # Deserialization (matches CADModelDataReader.cs)
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "CAD_ModelData":
+    def from_dict(cls, data: Dict[str, Any]) -> "CADModelData":
         """
-        Build a CAD_ModelData from a dict.
+        Build a CADModelData from a dict.
 
         Accepts:
           1. The C# envelope format `{"RootIndex": int, "Models": [...]}`
@@ -497,7 +497,7 @@ class CAD_ModelData:
              PascalCase or camelCase keys (case-insensitive).
         """
         if not isinstance(data, dict):
-            raise TypeError("CAD_ModelData.from_dict expects a dict")
+            raise TypeError("CADModelData.from_dict expects a dict")
 
         models_raw = _ci_get(data, "Models")
         if isinstance(models_raw, list) and models_raw:
@@ -511,7 +511,7 @@ class CAD_ModelData:
         cls,
         envelope: Dict[str, Any],
         models_raw: List[Dict[str, Any]],
-    ) -> "CAD_ModelData":
+    ) -> "CADModelData":
         root_index = int(_ci_get(envelope, "RootIndex", 0) or 0)
         if root_index < 0 or root_index >= len(models_raw):
             raise ValueError(
@@ -520,7 +520,7 @@ class CAD_ModelData:
             )
 
         # First pass: build models without children
-        models: List[CAD_ModelData] = [
+        models: List[CADModelData] = [
             cls._from_entry_dict(entry, models=None) for entry in models_raw
         ]
 
@@ -548,10 +548,10 @@ class CAD_ModelData:
     def _from_entry_dict(
         cls,
         entry: Dict[str, Any],
-        models: Optional[List["CAD_ModelData"]],
-    ) -> "CAD_ModelData":
+        models: Optional[List["CADModelData"]],
+    ) -> "CADModelData":
         """
-        Build a CAD_ModelData from a single entry dict (no ChildComponents
+        Build a CADModelData from a single entry dict (no ChildComponents
         wiring — that happens in the second pass when reading an envelope).
 
         If `models` is None, ChildComponents in the entry are ignored
@@ -609,7 +609,7 @@ class CAD_ModelData:
         )
 
     @classmethod
-    def load(cls, filepath: str) -> "CAD_ModelData":
+    def load(cls, filepath: str) -> "CADModelData":
         """Load from a JSON file (envelope or legacy flat format)."""
         with open(filepath, "r") as f:
             data = json.load(f)
@@ -656,7 +656,7 @@ class CAD_ModelData:
 
     def __repr__(self) -> str:
         return (
-            f"CAD_ModelData("
+            f"CADModelData("
             f"name='{self.ComponentName or self.ModelName}', "
             f"type={ModelType(self.ModelTypeValue).name}, "
             f"faces={self.total_face_count}, "

@@ -2,7 +2,7 @@
 CAD Model Viewer using PyVista
 
 A Python implementation of the CAD model viewer that mirrors the JavaScript/ThreeJS version.
-Supports loading CAD_ModelData JSON files and provides interactive 3D visualization.
+Supports loading CADModelData JSON files and provides interactive 3D visualization.
 """
 
 import json
@@ -11,8 +11,8 @@ import pyvista as pv
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
-# Import the CAD_ModelData class
-from model.cad_modeldata import CAD_ModelData, Face
+# Import the CADModelData class
+from model.CADModelData import CADModelData, Face
 
 
 class CADViewer:
@@ -37,7 +37,7 @@ class CADViewer:
         """Initialize the CAD viewer."""
         self.plotter: Optional[pv.Plotter] = None
         self.mesh: Optional[pv.PolyData] = None
-        self.model_data: Optional[CAD_ModelData] = None
+        self.model_data: Optional[CADModelData] = None
         self.actor: Optional[pv.Actor] = None
 
         # State
@@ -50,9 +50,9 @@ class CADViewer:
         self._mesh_center = np.array([0.0, 0.0, 0.0])
         self._mesh_size = 1.0
 
-    def _create_mesh_from_model(self, model_data: CAD_ModelData) -> pv.PolyData:
+    def _create_mesh_from_model(self, model_data: CADModelData) -> pv.PolyData:
         """
-        Create a PyVista mesh from CAD_ModelData.
+        Create a PyVista mesh from CADModelData.
 
         Args:
             model_data: The CAD model data containing face tessellation
@@ -173,9 +173,9 @@ class CADViewer:
         with open(filepath, 'r') as f:
             data = json.load(f)
 
-        # Try to load as CAD_ModelData first
+        # Try to load as CADModelData first
         try:
-            self.model_data = CAD_ModelData.from_dict(data)
+            self.model_data = CADModelData.from_dict(data)
             self.mesh = self._create_mesh_from_model(self.model_data)
         except Exception:
             # Fall back to direct dictionary parsing
@@ -198,12 +198,12 @@ class CADViewer:
             bounds[5] - bounds[4]
         )
 
-    def load_model(self, model_data: CAD_ModelData) -> None:
+    def load_model(self, model_data: CADModelData) -> None:
         """
-        Load a CAD model from a CAD_ModelData object.
+        Load a CAD model from a CADModelData object.
 
         Args:
-            model_data: The CAD_ModelData object
+            model_data: The CADModelData object
         """
         self.model_data = model_data
         self.mesh = self._create_mesh_from_model(model_data)
@@ -225,7 +225,7 @@ class CADViewer:
 
     def create_sample_cube(self) -> None:
         """Create a sample cube model for testing."""
-        # Create a simple cube using CAD_ModelData format
+        # Create a simple cube using CADModelData format
         # Cube vertices: 8 corners of a unit cube centered at origin
         size = 1.0
         half = size / 2
@@ -261,7 +261,7 @@ class CADViewer:
             )
             faces.append(face)
 
-        self.model_data = CAD_ModelData(
+        self.model_data = CADModelData(
             CadName="Sample",
             ModelName="Cube",
             ComponentName="Sample Cube",
