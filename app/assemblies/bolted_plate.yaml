@@ -1,0 +1,39 @@
+# Bolted plate: a 40x40x5 mm plate with an M6 bolt and matching nut.
+#
+#   plate: 40x40x5, centered on origin (top at z=+2.5, bottom at z=-2.5)
+#   bolt:  M6, head sits on top of the plate, shank passes through it
+#   nut:   M6, tightened against the underside of the plate
+
+name: bolted_plate
+units: mm
+
+instances:
+  - id: plate
+    part: box
+    params:   { boxx: 40, boxy: 40, boxz: 5 }
+    location: { translate: [0, 0, 0], rotate: [0, 0, 0] }
+    color:    [0.4, 0.5, 0.7]
+
+  - id: bolt
+    part: hex_bolt
+    params:
+      diameter:    6
+      length:      20
+      pitch:       1.0
+      head_width:  10
+      head_height: 4
+    # Bolt is built with head extruded along +Z and shank extending into -Z;
+    # placing the origin at z=+2.5 sits the head flush on the plate's top face.
+    location: { translate: [0, 0, 2.5], rotate: [0, 0, 0] }
+    color:    [0.75, 0.75, 0.78]
+
+  - id: nut
+    part: hex_nut
+    params:
+      across_flats:  10
+      thickness:     5
+      hole_diameter: 6
+    # Nut is built from z=0 up to z=thickness; place at z=-7.5 so its top
+    # face (at -7.5 + 5 = -2.5) sits flush against the plate's bottom face.
+    location: { translate: [0, 0, -7.5], rotate: [0, 0, 0] }
+    color:    [0.65, 0.65, 0.68]

@@ -16,7 +16,8 @@ from gi.repository import Gtk, Gdk, Pango
 
 from pathlib import Path
 
-from exporter import HAS_CADQUERY, HAS_FREECAD
+from converter import HAS_CADQUERY, HAS_FREECAD, part_to_modeldata
+from exporter import cadmodeldata_exporter, step_exporter
 from mesher import HAS_GMSH, create_mesh, save_mesh, save_mesh_json
 from dialogs import ask_save_mesh_file, ask_export_file, ask_mesh_settings
 from widgets import ModelBuilder
@@ -143,7 +144,7 @@ class CadQueryApp(Gtk.Window):
         shortcuts_label.set_margin_top(5)
         vbox.pack_start(shortcuts_label, False, False, 0)
 
-    def _on_view_requested(self, builder, model, exporter) -> None:
+    def _on_view_requested(self, builder, model) -> None:
         """Handle view request from ModelBuilder"""
         self.status_label.set_text("Opening viewer...")
         while Gtk.events_pending():
@@ -154,8 +155,21 @@ class CadQueryApp(Gtk.Window):
         viewer.connect('viewer-closed', lambda v: self._on_viewer_closed())
         viewer.connect('error', lambda v, msg: self._on_viewer_error(msg))
 
-        # Load mesh
-        if not viewer.set_mesh_from_exporter(exporter):
+        # Convert the freshly built model to a CAD_ModelData and feed it to
+        # the viewer.
+        try:
+            model_data = part_to_modeldata(
+                model,
+                name=builder.get_selected_model_name() or "model",
+                parameters=builder.get_current_build_params(),
+                param_signature=builder.get_current_build_signature(),
+            )
+        except Exception as e:
+            self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
+            self.status_label.set_text("Error: Conversion failed")
+            return
+
+        if not viewer.set_mesh_from_dict(model_data.to_dict()):
             self.status_label.set_text("Error: Failed to load mesh")
             return
 
@@ -193,7 +207,7 @@ class CadQueryApp(Gtk.Window):
             return
 
         model_name = self.model_builder.get_selected_model_name() or "model"
-        exporter = self.model_builder.get_current_exporter()
+        model = self.model_builder.get_current_model()
         result = ask_export_file(self, model_name)
 
         if result is None:
@@ -204,9 +218,15 @@ class CadQueryApp(Gtk.Window):
 
         try:
             if fmt == "step":
-                exporter.save_to_step(filename)
+                step_exporter.export(model, filename)
             else:
-                exporter.save_to_file(filename)
+                cadmodeldata_exporter.export(
+                    model,
+                    filename,
+                    name=model_name,
+                    parameters=self.model_builder.get_current_build_params(),
+                    param_signature=self.model_builder.get_current_build_signature(),
+                )
             self.status_label.set_text(f"Exported to {Path(filename).name}")
             self._show_info("Export Successful", f"Model exported to:\n{filename}")
         except Exception as e:

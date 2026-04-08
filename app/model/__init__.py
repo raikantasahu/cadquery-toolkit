@@ -2,7 +2,7 @@
 Model package for CAD data structures.
 
 This package provides data classes for representing CAD geometry
-in a format compatible with the C# CAD_ModelData class.
+in a format compatible with the C# CADModelData class.
 """
 
 from .cad_modeldata import (
@@ -17,6 +17,10 @@ from .cad_modeldata import (
     Volume,
     Body,
     Parameter,
+    Point,
+    Axis,
+    CoordinateSystem,
+    Component,
     # Main model class
     CAD_ModelData,
 )
@@ -31,5 +35,9 @@ __all__ = [
     'Volume',
     'Body',
     'Parameter',
+    'Point',
+    'Axis',
+    'CoordinateSystem',
+    'Component',
     'CAD_ModelData',
 ]

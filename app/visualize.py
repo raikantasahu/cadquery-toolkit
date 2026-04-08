@@ -22,8 +22,8 @@ import sys
 
 import gmsh
 
+from converter import part_to_modeldata
 from dialogs import ask_open_file
-from exporter import export_cadquery_model
 from mesher import gmsh_to_pyvista, mesh_json_to_pyvista
 from viewer import create_polydata_from_model_data, show_pyvista
 
@@ -44,8 +44,8 @@ def load_file(path):
     if ext in ('step', 'stp'):
         import cadquery as cq
         workplane = cq.importers.importStep(path)
-        model_data = export_cadquery_model(workplane)
-        return create_polydata_from_model_data(model_data), path, False
+        model_data = part_to_modeldata(workplane, name=path)
+        return create_polydata_from_model_data(model_data.to_dict()), path, False
 
     if ext == 'json':
         with open(path) as f:
@@ -54,11 +54,23 @@ def load_file(path):
         if 'nodes' in data and 'elements' in data:
             return mesh_json_to_pyvista(data), data.get('title', path), True
 
-        if 'faceList' in data:
-            return create_polydata_from_model_data(data), data.get('modelName', path), False
+        # CAD_ModelData envelope: { rootIndex, models: [...] }
+        # (case-insensitive so PascalCase from a C# writer works too)
+        models = data.get('models') or data.get('Models')
+        if isinstance(models, list) and models:
+            root_index = int(data.get('rootIndex', data.get('RootIndex', 0)) or 0)
+            root = models[root_index] if 0 <= root_index < len(models) else {}
+            title = root.get('modelName') or root.get('ModelName') or path
+            return create_polydata_from_model_data(data), title, False
+
+        # Legacy flat single-model CAD_ModelData
+        if 'faceList' in data or 'FaceList' in data:
+            title = data.get('modelName') or data.get('ModelName') or path
+            return create_polydata_from_model_data(data), title, False
 
         print("Error: JSON file does not look like a CAD model or mesh")
-        print("  Expected 'faceList' (CAD_ModelData) or 'nodes'+'elements' (mesh)")
+        print("  Expected 'models' (CAD_ModelData envelope), 'faceList' "
+              "(CAD_ModelData flat), or 'nodes'+'elements' (mesh)")
         sys.exit(1)
 
     print(f"Error: unsupported file extension '.{ext}'")

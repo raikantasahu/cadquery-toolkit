@@ -26,9 +26,9 @@ class ModelBuilder(Gtk.Box):
 
     Signals:
         model-built: Emitted when a model is successfully built
-            Args: model (CadQuery object), exporter (FreeCADExporter)
+            Args: model (CadQuery Workplane)
         view-requested: Emitted when user clicks View Model
-            Args: model, exporter
+            Args: model (CadQuery Workplane)
         status-changed: Emitted when status message changes
             Args: message (str)
     """
@@ -36,8 +36,8 @@ class ModelBuilder(Gtk.Box):
     __gtype_name__ = 'ModelBuilder'
 
     __gsignals__ = {
-        'model-built': (GObject.SignalFlags.RUN_FIRST, None, (object, object)),
-        'view-requested': (GObject.SignalFlags.RUN_FIRST, None, (object, object)),
+        'model-built': (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+        'view-requested': (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         'status-changed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'params-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
@@ -56,7 +56,6 @@ class ModelBuilder(Gtk.Box):
         self.functions = model_functions or {}
         self.param_entries = {}
         self.current_model = None
-        self.current_exporter = None
         self.current_build_params = {}
         self.current_build_sig = None
 
@@ -327,21 +326,8 @@ class ModelBuilder(Gtk.Box):
             self.current_build_params = params
             self.current_build_sig = sig
 
-            # Create exporter
-            self._emit_status("Processing geometry...")
-            while Gtk.events_pending():
-                Gtk.main_iteration()
-
-            from exporter import FreeCADExporter
-            self.current_exporter = FreeCADExporter(
-                self.current_model,
-                model_name=func_name,
-                parameters=params,
-                param_signature=sig,
-            )
-
             self._emit_status(f"Model '{func_name}' built successfully")
-            self.emit('model-built', self.current_model, self.current_exporter)
+            self.emit('model-built', self.current_model)
             return True
 
         except ValueError as e:
@@ -354,7 +340,7 @@ class ModelBuilder(Gtk.Box):
     def _on_view_clicked(self, button) -> None:
         """Handle View Model button click"""
         if self._build_model():
-            self.emit('view-requested', self.current_model, self.current_exporter)
+            self.emit('view-requested', self.current_model)
 
     def _on_clear_clicked(self, button) -> None:
         """Handle Clear button click"""
@@ -376,7 +362,6 @@ class ModelBuilder(Gtk.Box):
         self.param_entries.clear()
 
         self.current_model = None
-        self.current_exporter = None
         self.current_build_params = {}
         self.current_build_sig = None
 
@@ -403,10 +388,10 @@ class ModelBuilder(Gtk.Box):
         """Get the current built model (or None)"""
         return self.current_model
 
-    def get_current_exporter(self):
-        """Get the current exporter (or None)"""
-        return self.current_exporter
-
     def get_current_build_params(self) -> dict:
         """Get the parameters used for the last build"""
         return self.current_build_params
+
+    def get_current_build_signature(self):
+        """Get the inspect.Signature used for the last build (or None)"""
+        return self.current_build_sig
