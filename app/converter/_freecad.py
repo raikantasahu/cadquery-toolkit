@@ -2,10 +2,11 @@
 _freecad - FreeCAD-bound geometry walking for a single CadQuery part.
 
 Internal implementation detail of the `converter` package. This module hands
-a CadQuery shape to FreeCAD (currently via a temporary STEP file) and walks
-the resulting OCCT topology to pull out unique vertices, edges, tessellated
-faces, volumes, and bodies — plus mass properties (volume, center of mass,
-moments of inertia, bounding box).
+a CadQuery shape to FreeCAD (via a temporary BRep file — OCCT's native
+binary format, lossless and faster than STEP) and walks the resulting OCCT
+topology to pull out unique vertices, edges, tessellated faces, volumes,
+and bodies — plus mass properties (volume, center of mass, moments of
+inertia, bounding box).
 
 The output is a dict of plain dicts that mirror the CADModelData entity
 field names (camelCase). The public converter functions in
@@ -106,19 +107,27 @@ class _FreeCADShape:
     # ------------------------------------------------------------------
 
     def _load_to_freecad(self) -> Any:
-        """Hand the CadQuery shape to FreeCAD via a temporary STEP file.
+        """Hand the CadQuery shape to FreeCAD via a temporary BRep file.
 
-        TODO: replace this STEP roundtrip with a BRep tempfile (or in-memory
-        BRep stream). See the deferred task in the project task list.
+        BRep is OCCT's native binary format — both cadquery (via OCP) and
+        FreeCAD's Part module read and write it directly, with no protocol
+        translation and no precision loss. Faster and lossless compared to
+        round-tripping through STEP.
+
+        Future improvement (out of current scope): in-memory BRep transfer
+        via cq.Shape.exportBrep(BytesIO) + Part.Shape().importBrepFromString,
+        which would drop the tempfile entirely.
         """
-        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp:
-            step_file = tmp.name
+        with tempfile.NamedTemporaryFile(suffix=".brep", delete=False) as tmp:
+            brep_file = tmp.name
         try:
-            self._cq_shape().exportStep(step_file)
-            return Part.read(step_file)
+            self._cq_shape().exportBrep(brep_file)
+            shape = Part.Shape()
+            shape.importBrep(brep_file)
+            return shape
         finally:
-            if os.path.exists(step_file):
-                os.remove(step_file)
+            if os.path.exists(brep_file):
+                os.remove(brep_file)
 
     def _cq_shape(self):
         """Return the underlying CadQuery Shape (val()) for the input object."""
