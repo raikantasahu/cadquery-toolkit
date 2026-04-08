@@ -22,8 +22,9 @@ import sys
 
 import gmsh
 
-from converter import part_to_modeldata
+from converter import step_model_to_cadmodeldata
 from dialogs import ask_open_file
+from importer import step_importer
 from mesher import gmsh_to_pyvista, mesh_json_to_pyvista
 from viewer import create_polydata_from_model_data, show_pyvista
 
@@ -42,9 +43,8 @@ def load_file(path):
             gmsh.finalize()
 
     if ext in ('step', 'stp'):
-        import cadquery as cq
-        workplane = cq.importers.importStep(path)
-        model_data = part_to_modeldata(workplane, name=path)
+        model = step_importer.read(path)
+        model_data = step_model_to_cadmodeldata(model, name=path)
         return create_polydata_from_model_data(model_data.to_dict()), path, False
 
     if ext == 'json':

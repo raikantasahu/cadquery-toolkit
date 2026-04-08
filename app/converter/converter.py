@@ -230,6 +230,62 @@ def assembly_to_modeldata(
 
 
 # ----------------------------------------------------------------------
+# STEP-loaded model conversion
+# ----------------------------------------------------------------------
+
+def step_model_to_cadmodeldata(
+    model: Union[cq.Assembly, cq.Workplane, cq.Shape],
+    name: Optional[str] = None,
+    cad_name: str = "STEP",
+    length_unit: str = "mm",
+    mass_unit: str = "kg",
+    angle_unit: str = "degrees",
+) -> CADModelData:
+    """
+    Convert a CadQuery object loaded from a STEP file to a CADModelData.
+
+    The reading itself lives in `importer.step_importer.read(path)`; this
+    function takes the in-memory result and dispatches by type:
+
+      - cq.Assembly  → assembly_to_modeldata (multi-model envelope with
+                       PART children + per-instance Components)
+      - cq.Workplane / cq.Shape → part_to_modeldata (single PART)
+
+    The defaults differ from `to_modeldata` in one place: `cad_name`
+    defaults to `"STEP"` rather than `"CadQuery"`, reflecting that the
+    geometry came from a STEP file.
+
+    Note: STEP precision (~12 significant digits on floats) means recovered
+    transforms and coordinates may differ from the originals at the
+    1e-12-of-magnitude level. STEP also does not carry CadQuery build
+    parameters, so the returned CADModelData has an empty parameterList.
+    """
+    units_kwargs = dict(
+        cad_name=cad_name,
+        length_unit=length_unit,
+        mass_unit=mass_unit,
+        angle_unit=angle_unit,
+    )
+
+    if isinstance(model, cq.Assembly):
+        if name:
+            model.name = name
+        return assembly_to_modeldata(model, **units_kwargs)
+
+    if isinstance(model, (cq.Workplane, cq.Shape)):
+        return part_to_modeldata(
+            model,
+            name=name or "part",
+            **units_kwargs,
+        )
+
+    raise TypeError(
+        f"Expected cq.Assembly, cq.Workplane, or cq.Shape, "
+        f"got {type(model).__name__}"
+    )
+
+
+# ----------------------------------------------------------------------
 # Type-dispatching convenience
 # ----------------------------------------------------------------------
 
@@ -247,6 +303,10 @@ def to_modeldata(
     Keyword arguments are forwarded to the chosen function. Note that
     part-only kwargs (parameters, param_signature) are not accepted by
     assembly_to_modeldata; pass them only when you know the input is a part.
+
+    For STEP-loaded models, prefer `step_model_to_cadmodeldata` — it has
+    STEP-flavored defaults (cad_name="STEP"). For STEP files on disk, read
+    them first via `importer.step_importer.read(path)`.
     """
     if isinstance(thing, cq.Assembly):
         return assembly_to_modeldata(thing, **kwargs)
