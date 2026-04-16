@@ -19,7 +19,6 @@ Usage:
 """
 
 import enum
-import json
 import tempfile
 import os
 
@@ -311,73 +310,49 @@ class GmshMesher:
         gmsh.write(filename)
 
     def save_as_json(self, filename: str, title: str = None) -> None:
-        """
-        Write the generated mesh to a JSON file.
+        """Write the generated mesh to a JSON file.
 
-        Output structure matches the cantilever_beam.json format:
-        nodes as {id: [x, y, z]}, elements with type/material, and
-        a default isotropic material entry.
-
+        Delegates to :func:`mesher.export.json_exporter.save_as_json`.
         Does NOT finalize Gmsh.
-
-        Args:
-            filename: Output file path (should end with .json).
-            title: Optional title string. Defaults to the model name.
         """
         if not self._initialized:
             raise RuntimeError("No mesh generated yet. Call generate() first.")
+        from .export.json_exporter import save_as_json
+        save_as_json(filename, title=title or self.model_name)
 
-        # Nodes
-        node_tags, coords, _ = gmsh.model.mesh.getNodes()
-        nodes = {}
-        for i, tag in enumerate(node_tags):
-            x, y, z = coords[3 * i], coords[3 * i + 1], coords[3 * i + 2]
-            nodes[str(int(tag))] = [float(x), float(y), float(z)]
+    def save_as_meshdata_xml(self, filename: str, mesh_id: int = 1,
+                             owner: str = None,
+                             entity_owners: dict = None) -> None:
+        """Write the generated mesh to a MeshData XML file.
 
-        # 3D elements
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
-        elements = []
-        elem_id = 1
-        for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
-            type_name = _GMSH_TO_NAME.get(int(etype))
-            if type_name is None:
-                continue
-            props = gmsh.model.mesh.getElementProperties(int(etype))
-            nodes_per_elem = props[3]
-            num_elems = len(enodes) // nodes_per_elem
-            for i in range(num_elems):
-                start = i * nodes_per_elem
-                end = start + nodes_per_elem
-                element_nodes = [int(n) for n in enodes[start:end]]
-                elements.append({
-                    "id": elem_id,
-                    "type": type_name,
-                    "nodes": element_nodes,
-                    "material": 1,
-                })
-                elem_id += 1
+        Delegates to :func:`mesher.export.meshdata_xml_exporter.save_as_meshdata_xml`.
+        Does NOT finalize Gmsh.
+        """
+        if not self._initialized:
+            raise RuntimeError("No mesh generated yet. Call generate() first.")
+        from .export.meshdata_xml_exporter import save_as_meshdata_xml
+        save_as_meshdata_xml(
+            filename, mesh_id=mesh_id,
+            owner=owner or self.model_name,
+            entity_owners=entity_owners,
+        )
 
-        with open(filename, "w") as f:
-            f.write("{\n")
-            f.write(f'  "title": {json.dumps(title or self.model_name)},\n')
+    def save_as_meshdata_json(self, filename: str, mesh_id: int = 1,
+                              owner: str = None,
+                              entity_owners: dict = None) -> None:
+        """Write the generated mesh to a MeshData JSON file.
 
-            f.write('  "nodes": {\n')
-            node_items = list(nodes.items())
-            for i, (nid, coords) in enumerate(node_items):
-                comma = "," if i < len(node_items) - 1 else ""
-                f.write(f"    {json.dumps(nid)}: {json.dumps(coords)}{comma}\n")
-            f.write("  },\n")
-
-            f.write('  "elements": [\n')
-            for i, elem in enumerate(elements):
-                comma = "," if i < len(elements) - 1 else ""
-                f.write(f"    {json.dumps(elem)}{comma}\n")
-            f.write("  ],\n")
-
-            f.write('  "materials": [\n')
-            f.write('    {"id": 1, "type": "isotropic", "E": 200e9, "nu": 0.3}\n')
-            f.write("  ]\n")
-            f.write("}\n")
+        Delegates to :func:`mesher.export.meshdata_json_exporter.save_as_meshdata_json`.
+        Does NOT finalize Gmsh.
+        """
+        if not self._initialized:
+            raise RuntimeError("No mesh generated yet. Call generate() first.")
+        from .export.meshdata_json_exporter import save_as_meshdata_json
+        save_as_meshdata_json(
+            filename, mesh_id=mesh_id,
+            owner=owner or self.model_name,
+            entity_owners=entity_owners,
+        )
 
     def _import_geometry(self) -> None:
         """Export CadQuery object to a temporary STEP file and import into Gmsh."""

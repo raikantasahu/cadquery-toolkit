@@ -14,6 +14,8 @@ from .gmsh_mesher import (
     mesh_json_to_pyvista,
 )
 
+from . import export  # noqa: F401 — register submodule
+
 __all__ = [
     'HAS_GMSH',
     'GmshMesher',
@@ -24,4 +26,5 @@ __all__ = [
     'generate_pyvista_mesh',
     'gmsh_to_pyvista',
     'mesh_json_to_pyvista',
+    'export',
 ]
