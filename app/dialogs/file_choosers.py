@@ -14,8 +14,8 @@ _MESH_FILTERS = [
 ]
 
 _EXPORT_FILTERS = [
-    ("JSON files (*.json)", ["*.json"]),
     ("STEP files (*.step, *.stp)", ["*.step", "*.stp"]),
+    ("JSON files (*.json)", ["*.json"]),
 ]
 
 _OPEN_FILTERS = [
@@ -194,7 +194,7 @@ def ask_export_file(parent, default_name):
     filename, idx = _run_dialog(
         "Export CAD Model", parent,
         Gtk.FileChooserAction.SAVE, _EXPORT_FILTERS,
-        default_name=f"{default_name}.step",
+        default_name=f"{default_name}.step", swap_ext=True,
     )
     if filename is None:
         return None
