@@ -20,6 +20,7 @@ _EXPORT_FILTERS = [
 
 _OPEN_FILTERS = [
     ("JSON files (*.json)", ["*.json"]),
+    ("MeshData XML (*.xml)", ["*.xml"]),
     ("Gmsh mesh (*.msh)", ["*.msh"]),
     ("STEP files (*.step, *.stp)", ["*.step", "*.stp"]),
 ]

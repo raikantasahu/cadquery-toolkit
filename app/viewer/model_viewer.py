@@ -352,17 +352,30 @@ class ModelViewer(GObject.Object):
 
     def set_mesh_from_dict(self, data: Dict[str, Any]) -> bool:
         """
-        Load mesh from CAD_ModelData dictionary.
+        Load mesh from a CAD_ModelData or MeshData dictionary.
+
+        Auto-detects the schema:
+          - MeshData (volumetric): has ``nodes`` and ``fragments`` keys.
+            Displayed with volumetric styling (edges visible).
+          - CAD_ModelData (surface): everything else — envelope with
+            ``models`` or flat with ``faceList``.
 
         Args:
-            data: Dictionary in CAD_ModelData format
+            data: Dictionary in CAD_ModelData or MeshData format.
 
         Returns:
-            True if successful, False otherwise
+            True if successful, False otherwise.
         """
         try:
-            self._mesh = create_polydata_from_model_data(data)
-            self._is_volumetric = False
+            if 'fragments' in data and 'nodes' in data:
+                # Lazy import so model_viewer stays importable even when
+                # the mesher package (pyvista/gmsh) isn't loaded yet.
+                from mesher.meshdata_reader import meshdata_to_pyvista
+                self._mesh = meshdata_to_pyvista(data)
+                self._is_volumetric = True
+            else:
+                self._mesh = create_polydata_from_model_data(data)
+                self._is_volumetric = False
             info = self.get_mesh_info()
             self.emit('mesh-loaded', info)
             return True

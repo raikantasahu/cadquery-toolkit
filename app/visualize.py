@@ -4,13 +4,16 @@ visualize.py - Standalone CLI for viewing CAD models and volumetric meshes.
 
 Accepts a file path and auto-detects the format:
   - .json with "faceList"            → CAD_ModelData (surface view)
-  - .json with "nodes"/"elements"    → mesh JSON     (volumetric view)
+  - .json with "fragments"           → MeshData JSON (volumetric view)
+  - .json with "nodes"/"elements"    → legacy mesh JSON (volumetric view)
+  - .xml with <Mesh> root            → MeshData XML  (volumetric view)
   - .msh                             → Gmsh mesh     (volumetric view)
   - .step / .stp                     → STEP model    (surface view)
 
 Usage:
     python visualize.py model.json
     python visualize.py mesh.json
+    python visualize.py mesh.xml
     python visualize.py mesh.msh
     python visualize.py part.step
     python visualize.py              # opens a file selection dialog
@@ -25,7 +28,12 @@ import gmsh
 from converter import step_model_to_cadmodeldata
 from dialogs import ask_open_file
 from importer import step_importer
-from mesher import gmsh_to_pyvista, mesh_json_to_pyvista
+from mesher import (
+    gmsh_to_pyvista,
+    mesh_json_to_pyvista,
+    meshdata_to_pyvista,
+    meshdata_xml_to_dict,
+)
 from viewer import create_polydata_from_model_data, show_pyvista
 
 
@@ -47,10 +55,22 @@ def load_file(path):
         model_data = step_model_to_cadmodeldata(model, name=path)
         return create_polydata_from_model_data(model_data.to_dict()), path, False
 
+    if ext == 'xml':
+        # MeshData XML — volumetric mesh emitted by save_as_meshdata_xml
+        data = meshdata_xml_to_dict(path)
+        title = data.get('owner') or path
+        return meshdata_to_pyvista(data), title, True
+
     if ext == 'json':
         with open(path) as f:
             data = json.load(f)
 
+        # MeshData JSON: nodes + fragments (new volumetric schema)
+        if 'fragments' in data and 'nodes' in data:
+            title = data.get('owner') or path
+            return meshdata_to_pyvista(data), title, True
+
+        # Legacy mesh JSON: flat nodes-dict + elements-list
         if 'nodes' in data and 'elements' in data:
             return mesh_json_to_pyvista(data), data.get('title', path), True
 
@@ -70,11 +90,12 @@ def load_file(path):
 
         print("Error: JSON file does not look like a CAD model or mesh")
         print("  Expected 'models' (CAD_ModelData envelope), 'faceList' "
-              "(CAD_ModelData flat), or 'nodes'+'elements' (mesh)")
+              "(CAD_ModelData flat), 'fragments' (MeshData), or "
+              "'nodes'+'elements' (legacy mesh)")
         sys.exit(1)
 
     print(f"Error: unsupported file extension '.{ext}'")
-    print("Supported formats: .json, .msh, .step, .stp")
+    print("Supported formats: .json, .xml, .msh, .step, .stp")
     sys.exit(1)
 
 
@@ -84,7 +105,8 @@ def main():
     )
     parser.add_argument(
         'file', nargs='?', default=None,
-        help="Path to a .json, .msh, .step, or .stp file (opens dialog if omitted)",
+        help="Path to a .json, .xml, .msh, .step, or .stp file "
+             "(opens dialog if omitted)",
     )
     args = parser.parse_args()
 
