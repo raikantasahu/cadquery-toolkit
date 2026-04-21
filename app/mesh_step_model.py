@@ -13,8 +13,9 @@ Usage:
 Example config (mesh_config.yaml):
 
     mesh:
-      elementType: tet4       # tet4, tet10, hex8, hex20, hex27
+      elementType: tet4             # tet4, tet10, hex8, hex20, hex27
       elementSize: 5.0
+      relativeSagTolerance: 0.01    # optional; max sag/radius on curved faces
 
     output:
       format: xml             # xml, json (MeshData formats), or msh
@@ -90,6 +91,15 @@ def main():
     element_size = float(mesh_cfg.get("elementSize", 5.0))
     mesh_owner = mesh_cfg.get("owner")
 
+    relative_sag_tolerance = mesh_cfg.get("relativeSagTolerance")
+    if relative_sag_tolerance is not None:
+        relative_sag_tolerance = float(relative_sag_tolerance)
+        if relative_sag_tolerance <= 0:
+            parser.error(
+                f"relativeSagTolerance must be positive "
+                f"(got {relative_sag_tolerance})"
+            )
+
     output_format = output_cfg.get("format", "msh")
     if output_format not in _FORMAT_EXTENSIONS:
         parser.error(
@@ -110,7 +120,11 @@ def main():
     model = step_importer.read(str(input_path))
 
     mesher = GmshMesher(model, model_name=name)
-    stats = mesher.generate(mesh_type, element_size=element_size)
+    stats = mesher.generate(
+        mesh_type,
+        element_size=element_size,
+        relative_sag_tolerance=relative_sag_tolerance,
+    )
 
     if stats.get("warning"):
         print(f"Warning: {stats['warning']}")

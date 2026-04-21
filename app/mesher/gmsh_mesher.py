@@ -19,6 +19,7 @@ Usage:
 """
 
 import enum
+import math
 import tempfile
 import os
 
@@ -105,6 +106,25 @@ def mesh_json_to_pyvista(data: dict) -> pv.UnstructuredGrid:
     return pv.UnstructuredGrid(cells, celltypes, points)
 
 
+def sag_tol_to_elements_per_circle(relative_sag_tol: float,
+                                   min_n: int = 8) -> float:
+    """Map a relative sag tolerance S = δ/R to Mesh.MeshSizeFromCurvature.
+
+    For a circle of radius R sampled by N equal chords, the max sag is
+    δ = R(1 − cos(π/N)). Solving for N gives N = π / arccos(1 − S).
+    Result is rounded up and clamped to ``min_n`` to avoid degenerate meshes.
+
+    Returns 0.0 when ``relative_sag_tol`` is non-positive (Gmsh treats 0 as
+    disabling curvature-driven sizing).
+    """
+    if relative_sag_tol <= 0:
+        return 0.0
+    # Clamp to avoid arccos domain issues if S ≥ 1.
+    argument = max(-1.0, min(1.0, 1.0 - relative_sag_tol))
+    n = math.pi / math.acos(argument)
+    return float(max(min_n, math.ceil(n)))
+
+
 class MeshType(enum.Enum):
     """Supported volumetric mesh element types."""
     TET4 = "tet4"
@@ -123,7 +143,8 @@ _MESH_TYPE_MAP = {
 }
 
 
-def create_mesh(model, mesh_type_str, element_size, model_name="model"):
+def create_mesh(model, mesh_type_str, element_size, model_name="model",
+                relative_sag_tolerance=None):
     """Generate a volumetric mesh and return the mesher with statistics.
 
     Args:
@@ -131,6 +152,8 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model"):
         mesh_type_str: Mesh type key ("tet4", "tet10", "hex8", "hex20", or "hex27").
         element_size: Target element size.
         model_name: Name used for the Gmsh model.
+        relative_sag_tolerance: Optional curvature-driven refinement tolerance
+            S = δ/R. See ``GmshMesher.generate``.
 
     Returns:
         Tuple of (GmshMesher, stats_dict). The mesher holds the generated
@@ -138,7 +161,8 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model"):
     """
     mesh_type = _MESH_TYPE_MAP[mesh_type_str]
     mesher = GmshMesher(model, model_name=model_name)
-    stats = mesher.generate(mesh_type, element_size)
+    stats = mesher.generate(mesh_type, element_size,
+                            relative_sag_tolerance=relative_sag_tolerance)
     return mesher, stats
 
 
@@ -214,7 +238,8 @@ def gmsh_to_pyvista() -> pv.UnstructuredGrid:
 
 
 def generate_pyvista_mesh(model, mesh_type_str, element_size,
-                          model_name="model"):
+                          model_name="model",
+                          relative_sag_tolerance=None):
     """Generate a volumetric mesh and return it as a PyVista UnstructuredGrid.
 
     Args:
@@ -222,11 +247,14 @@ def generate_pyvista_mesh(model, mesh_type_str, element_size,
         mesh_type_str: Mesh type key ("tet4", "tet10", "hex8", "hex20", or "hex27").
         element_size: Target element size.
         model_name: Name used for the Gmsh model.
+        relative_sag_tolerance: Optional curvature-driven refinement tolerance
+            S = δ/R. See ``GmshMesher.generate``.
 
     Returns:
         pv.UnstructuredGrid containing the volumetric mesh.
     """
-    mesher, _ = create_mesh(model, mesh_type_str, element_size, model_name)
+    mesher, _ = create_mesh(model, mesh_type_str, element_size, model_name,
+                            relative_sag_tolerance=relative_sag_tolerance)
     ugrid = mesher.get_pyvista_mesh()
     mesher.finalize()
     return ugrid
@@ -251,13 +279,19 @@ class GmshMesher:
         self._initialized = False
 
     def generate(self, mesh_type: MeshType = MeshType.TET4,
-                 element_size: float = 5.0) -> dict:
+                 element_size: float = 5.0,
+                 relative_sag_tolerance: float = None) -> dict:
         """
         Generate a volumetric mesh.
 
         Args:
             mesh_type: Element type (TET4, TET10, HEX8, HEX20, or HEX27).
-            element_size: Target element size.
+            element_size: Target element size (upper bound).
+            relative_sag_tolerance: Optional curvature-driven refinement.
+                S = δ/R, the max allowed sag-to-radius ratio on curved faces.
+                When set, enables Gmsh's MeshSizeFromCurvature with N =
+                π / arccos(1 − S) elements per 2π radians and relaxes the
+                minimum-size clamp so tight curves can actually refine.
 
         Returns:
             Dictionary with mesh statistics: node_count, element_count,
@@ -269,7 +303,7 @@ class GmshMesher:
         gmsh.model.add(self.model_name)
 
         self._import_geometry()
-        self._configure_mesh(mesh_type, element_size)
+        self._configure_mesh(mesh_type, element_size, relative_sag_tolerance)
 
         gmsh.model.mesh.generate(3)
 
@@ -371,10 +405,19 @@ class GmshMesher:
             os.unlink(tmp_path)
 
     def _configure_mesh(self, mesh_type: MeshType,
-                        element_size: float) -> None:
+                        element_size: float,
+                        relative_sag_tolerance: float = None) -> None:
         """Configure Gmsh meshing options based on mesh type and element size."""
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size * 0.5)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", element_size)
+
+        if relative_sag_tolerance and relative_sag_tolerance > 0:
+            n = sag_tol_to_elements_per_circle(relative_sag_tolerance)
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", n)
+            # Relax the minimum-size clamp so tight curves can refine below
+            # element_size * 0.5. Gmsh treats 0 as "no lower bound".
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.0)
+        else:
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size * 0.5)
 
         if mesh_type == MeshType.TET4:
             # Default Delaunay tetrahedral meshing, no recombination
