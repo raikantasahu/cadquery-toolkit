@@ -88,6 +88,7 @@ def main():
         )
     mesh_type = _MESH_TYPES[element_type_str]
     element_size = float(mesh_cfg.get("elementSize", 5.0))
+    mesh_owner = mesh_cfg.get("owner")
 
     output_format = output_cfg.get("format", "msh")
     if output_format not in _FORMAT_EXTENSIONS:
@@ -103,6 +104,7 @@ def main():
         output_path = input_path.with_suffix(_FORMAT_EXTENSIONS[output_format])
 
     name = args.name or input_path.stem
+    owner = mesh_owner or name
 
     # --- Mesh ---
     model = step_importer.read(str(input_path))
@@ -115,11 +117,11 @@ def main():
 
     if output_format == "xml":
         mesher.save_as_meshdata_xml(
-            str(output_path), owner=name, entity_owners=entity_owners,
+            str(output_path), owner=owner, entity_owners=entity_owners,
         )
     elif output_format == "json":
         mesher.save_as_meshdata_json(
-            str(output_path), owner=name, entity_owners=entity_owners,
+            str(output_path), owner=owner, entity_owners=entity_owners,
         )
     else:
         mesher.save(str(output_path))
