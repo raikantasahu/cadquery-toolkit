@@ -107,10 +107,14 @@ def _walk_envelope(
     parent to obtain the child's world transform.
     """
     if model_index in visited:
-        # Defensive: a properly written envelope is acyclic, but the C#
-        # format allows shared sub-models, so don't infinite-loop on cycles.
+        # True cycle: this model is its own ancestor on the current
+        # recursion path. The envelope is acyclic by construction, but
+        # guard anyway to avoid infinite recursion on malformed input.
         return
-    visited.add(model_index)
+    # Rebind to a new set local to this call so sibling traversals don't
+    # inherit each other's "seen" markers — required for shared sub-models
+    # (a single PART referenced by multiple Component instances).
+    visited = visited | {model_index}
 
     model = models[model_index]
 

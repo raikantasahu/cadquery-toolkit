@@ -76,12 +76,12 @@ write a STEP or `CADModelData` JSON file.
 ### Build an assembly from a YAML spec
 
 ```bash
-python build_assembly.py assemblies/bolted_plate.yaml -o bolted_plate.json
-python build_assembly.py assemblies/bolted_plate.yaml -o bolted_plate.step
-python build_assembly.py assemblies/bolted_plate.yaml --view
+python build_assembly.py models/assemblies/bolted_plate.yaml -o bolted_plate.json
+python build_assembly.py models/assemblies/bolted_plate.yaml -o bolted_plate.step
+python build_assembly.py models/assemblies/bolted_plate.yaml --view
 ```
 
-A minimal `assemblies/*.yaml` looks like this:
+A minimal `models/assemblies/*.yaml` looks like this:
 
 ```yaml
 name: bolted_plate
@@ -158,9 +158,11 @@ app/
   step_to_cadmodeldata.py   # CLI: STEP file → CADModelData JSON
   visualize.py              # CLI: open viewer for any supported format
   assembly.py               # YAML assembly loader
-  assemblies/               # sample YAML assembly specs
 
-  models/                   # auto-discovered part functions (box, hex_bolt, ...)
+  models/
+    parts/                  # auto-discovered part functions (box, hex_bolt, ...)
+    assemblies/             # parametric Python assemblies + static YAML specs
+    common/                 # shared helpers (placeholder)
   model/                    # CADModelData dataclass (mirrors C# schema)
 
   importer/                 # file → CadQuery objects

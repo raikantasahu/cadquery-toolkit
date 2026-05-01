@@ -18,6 +18,13 @@ lib/
 lib64/
 parts/
 sdist/
+
+# Re-include the parametric parts package — distinct from a setuptools
+# `parts/` build directory. The negation re-includes the directory and its
+# contents; the rule afterwards keeps the bytecode cache out of git.
+!models/parts/
+!models/parts/**
+models/parts/__pycache__/
 var/
 wheels/
 *.egg-info/

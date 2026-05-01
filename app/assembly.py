@@ -1,7 +1,7 @@
 """
 assembly.py - Build a cq.Assembly from a declarative YAML spec.
 
-Spec format (see app/assemblies/*.yaml for examples):
+Spec format (see app/models/assemblies/*.yaml for examples):
 
     name: my_assembly
     units: mm
@@ -24,7 +24,7 @@ from typing import Any, Dict, Union
 import cadquery as cq
 import yaml
 
-from models import get_model_function
+from models.parts import get_part_function
 
 
 def _make_location(loc: Dict[str, Any]) -> cq.Location:
@@ -68,7 +68,7 @@ def load_assembly(path: Union[str, Path]) -> cq.Assembly:
         if not part_name:
             raise ValueError(f"Instance {inst.get('id', '?')!r} missing 'part'")
 
-        func = get_model_function(part_name)
+        func = get_part_function(part_name)
         if func is None:
             raise ValueError(
                 f"Unknown part '{part_name}' (not found in models registry)"

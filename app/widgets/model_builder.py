@@ -69,8 +69,8 @@ class ModelBuilder(Gtk.Box):
     def _load_models(self) -> None:
         """Load model functions from models module"""
         try:
-            from models import get_all_models
-            self.functions = get_all_models()
+            from models.parts import get_all_parts
+            self.functions = get_all_parts()
         except ImportError:
             self.functions = {}
 

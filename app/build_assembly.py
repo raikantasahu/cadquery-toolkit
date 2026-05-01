@@ -2,17 +2,18 @@
 """
 build_assembly.py - Build an assembly from a YAML spec.
 
-Loads a declarative assembly spec (see app/assemblies/*.yaml), instantiates
-each part via the auto-discovered models registry, places them with the
-specified transforms, and either exports the result or opens the viewer.
+Loads a declarative assembly spec (see app/models/assemblies/*.yaml),
+instantiates each part via the auto-discovered parts registry, places them
+with the specified transforms, and either exports the result or opens the
+viewer.
 
 The output format is chosen by the file extension:
     .json           → CAD_ModelData envelope (1 ASSEMBLY + N PART entries)
     .step / .stp    → STEP file (preserves component structure via cadquery)
 
 Usage:
-    python build_assembly.py assemblies/bolted_plate.yaml --view
-    python build_assembly.py assemblies/bolted_plate.yaml -o bolted_plate.json
+    python build_assembly.py models/assemblies/bolted_plate.yaml --view
+    python build_assembly.py models/assemblies/bolted_plate.yaml -o bolted_plate.json
     python build_assembly.py assemblies/bolted_plate.yaml -o bolted_plate.step
     python build_assembly.py assemblies/bolted_plate.yaml -o out.json --view
 """
