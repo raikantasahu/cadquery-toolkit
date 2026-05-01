@@ -389,7 +389,13 @@ class GmshMesher:
         )
 
     def _import_geometry(self) -> None:
-        """Export CadQuery object to a temporary STEP file and import into Gmsh."""
+        """Export CadQuery object to a temporary STEP file and import into Gmsh.
+
+        Type-dispatched: ``cq.exporters.export(..., STEP)`` raises a
+        DispatchError on ``cq.Assembly`` inputs in some cadquery versions
+        (no Assembly overload registered on the generic dispatcher), so
+        Assembly is routed explicitly through ``exportAssembly``.
+        """
         import cadquery as cq
 
         with tempfile.NamedTemporaryFile(
@@ -398,7 +404,13 @@ class GmshMesher:
             tmp_path = tmp.name
 
         try:
-            cq.exporters.export(self.cq_object, tmp_path, cq.exporters.ExportTypes.STEP)
+            if isinstance(self.cq_object, cq.Assembly):
+                from cadquery.occ_impl.exporters.assembly import exportAssembly
+                exportAssembly(self.cq_object, tmp_path)
+            else:
+                cq.exporters.export(
+                    self.cq_object, tmp_path, cq.exporters.ExportTypes.STEP
+                )
             gmsh.merge(tmp_path)
             gmsh.model.occ.synchronize()
         finally:
