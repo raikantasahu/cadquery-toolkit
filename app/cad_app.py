@@ -14,14 +14,23 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, Pango
 
-from pathlib import Path
+import cadquery as cq
 
-from converter import HAS_CADQUERY, HAS_FREECAD, part_to_modeldata
+from pathlib import Path
+from typing import Optional
+
+from converter import (
+    HAS_CADQUERY, HAS_FREECAD,
+    part_to_modeldata, assembly_to_modeldata,
+)
 from exporter import cadmodeldata_exporter, step_exporter
 from mesher import HAS_GMSH, create_mesh, save_mesh, save_mesh_json
 from dialogs import ask_save_mesh_file, ask_export_file, ask_mesh_settings
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
+
+from models.parts import get_all_parts
+from models.assemblies import get_all_assemblies
 
 
 class CadQueryApp(Gtk.Window):
@@ -116,13 +125,32 @@ class CadQueryApp(Gtk.Window):
         title_label.set_margin_bottom(5)
         vbox.pack_start(title_label, False, False, 0)
 
-        # Model Builder widget
-        self.model_builder = ModelBuilder()
-        self.model_builder.connect('view-requested', self._on_view_requested)
-        self.model_builder.connect('status-changed', self._on_status_changed)
-        self.model_builder.connect('params-changed', self._on_params_changed)
-        self.model_builder.function_combo.connect('changed', self._on_model_type_changed)
-        vbox.pack_start(self.model_builder, True, True, 0)
+        # Two top-level tabs: Parts and Assemblies. Each tab wraps a
+        # ModelBuilder bound to its own registry (parts vs. parametric
+        # assemblies). The "active" builder — used by all menu callbacks —
+        # is whichever notebook page is currently visible.
+        self.notebook = Gtk.Notebook()
+        self.notebook.connect('switch-page', self._on_tab_switched)
+
+        self.parts_builder = ModelBuilder(
+            model_functions=get_all_parts(), kind_label="Part",
+        )
+        self._add_tab_padding(self.parts_builder)
+        self._wire_builder(self.parts_builder)
+        self.notebook.append_page(
+            self.parts_builder, Gtk.Label(label="Parts"),
+        )
+
+        self.assemblies_builder = ModelBuilder(
+            model_functions=get_all_assemblies(), kind_label="Assembly",
+        )
+        self._add_tab_padding(self.assemblies_builder)
+        self._wire_builder(self.assemblies_builder)
+        self.notebook.append_page(
+            self.assemblies_builder, Gtk.Label(label="Assemblies"),
+        )
+
+        vbox.pack_start(self.notebook, True, True, 0)
 
         # Status bar
         vbox.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 5)
@@ -144,6 +172,56 @@ class CadQueryApp(Gtk.Window):
         shortcuts_label.set_margin_top(5)
         vbox.pack_start(shortcuts_label, False, False, 0)
 
+    # --- Active-builder helpers ---
+
+    @property
+    def model_builder(self) -> Optional[ModelBuilder]:
+        """Return the active tab if it is a ``ModelBuilder``, else ``None``.
+
+        Answers the typed conditional question "is the active tab a model
+        builder, and if so, which?" — not the broader "which widget is the
+        active tab?" The notebook can in principle hold non-builder pages
+        (a future Settings tab, etc.); this property returns ``None`` for
+        those, and callers that operate on a builder either short-circuit
+        on ``None`` or are gated upstream by menu-item sensitivity (which
+        is itself ``False`` when no active builder is present).
+        """
+        page_num = self.notebook.get_current_page()
+        if page_num < 0:
+            return None
+        page = self.notebook.get_nth_page(page_num)
+        return page if isinstance(page, ModelBuilder) else None
+
+    def _wire_builder(self, builder: ModelBuilder) -> None:
+        """Connect a ModelBuilder's signals to the app's handlers."""
+        builder.connect('view-requested', self._on_view_requested)
+        builder.connect('status-changed', self._on_status_changed)
+        builder.connect('params-changed', self._on_params_changed)
+        builder.connect('model-type-changed', self._on_model_type_changed)
+
+    def _add_tab_padding(self, widget: Gtk.Widget, margin: int = 10) -> None:
+        """Give a notebook page widget breathing room from the tab borders."""
+        widget.set_margin_start(margin)
+        widget.set_margin_end(margin)
+        widget.set_margin_top(margin)
+        widget.set_margin_bottom(margin)
+
+    def _on_tab_switched(self, notebook, page, page_num) -> None:
+        """Tab switch invalidates any held mesh, re-syncs menu sensitivity,
+        and restores the new tab's last builder status.
+
+        Reads the new builder from `page_num` rather than via the
+        `model_builder` property because GTK has not yet committed
+        `get_current_page()` at the time this signal fires.
+        """
+        self._finalize_current_mesh()
+        builder = notebook.get_nth_page(page_num)
+        self._sync_menu_sensitivity(builder=builder)
+        status = builder.last_status_message
+        if not status:
+            status = f"{notebook.get_tab_label_text(builder)} — no model selected"
+        self.status_label.set_text(status)
+
     def _on_view_requested(self, builder, model) -> None:
         """Handle view request from ModelBuilder"""
         self.status_label.set_text("Opening viewer...")
@@ -156,14 +234,18 @@ class CadQueryApp(Gtk.Window):
         viewer.connect('error', lambda v, msg: self._on_viewer_error(msg))
 
         # Convert the freshly built model to a CAD_ModelData and feed it to
-        # the viewer.
+        # the viewer. Assemblies route through assembly_to_modeldata; parts
+        # carry their build parameters / signature into the part envelope.
         try:
-            model_data = part_to_modeldata(
-                model,
-                name=builder.get_selected_model_name() or "model",
-                parameters=builder.get_current_build_params(),
-                param_signature=builder.get_current_build_signature(),
-            )
+            if isinstance(model, cq.Assembly):
+                model_data = assembly_to_modeldata(model)
+            else:
+                model_data = part_to_modeldata(
+                    model,
+                    name=builder.get_selected_model_name() or "model",
+                    parameters=builder.get_current_build_params(),
+                    param_signature=builder.get_current_build_signature(),
+                )
         except Exception as e:
             self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
             self.status_label.set_text("Error: Conversion failed")
@@ -173,9 +255,11 @@ class CadQueryApp(Gtk.Window):
             self.status_label.set_text("Error: Failed to load mesh")
             return
 
-        # Disable controls while viewer is open
-        self.model_builder.set_sensitive_controls(False)
-        self._set_menu_sensitive(False)
+        # Disable both builders + the notebook while viewer is open.
+        self.parts_builder.set_sensitive_controls(False)
+        self.assemblies_builder.set_sensitive_controls(False)
+        self.notebook.set_sensitive(False)
+        self._sync_menu_sensitivity(enabled=False)
         self.status_label.set_text("Viewer open - close viewer window to continue")
 
         # Show viewer (blocking)
@@ -183,15 +267,19 @@ class CadQueryApp(Gtk.Window):
 
     def _on_viewer_error(self, message: str) -> None:
         """Handle viewer error"""
-        self.model_builder.set_sensitive_controls(True)
-        self._set_menu_sensitive(True)
+        self.parts_builder.set_sensitive_controls(True)
+        self.assemblies_builder.set_sensitive_controls(True)
+        self.notebook.set_sensitive(True)
+        self._sync_menu_sensitivity()
         self._show_error("Viewer Error", message)
         self.status_label.set_text("Error: Viewer failed")
 
     def _on_viewer_closed(self) -> None:
         """Called when viewer window is closed"""
-        self.model_builder.set_sensitive_controls(True)
-        self._set_menu_sensitive(True)
+        self.parts_builder.set_sensitive_controls(True)
+        self.assemblies_builder.set_sensitive_controls(True)
+        self.notebook.set_sensitive(True)
+        self._sync_menu_sensitivity()
         self.present()
         self.status_label.set_text("Viewer closed. Ready to continue.")
 
@@ -199,15 +287,21 @@ class CadQueryApp(Gtk.Window):
 
     def _on_menu_view(self, menuitem) -> None:
         """Handle Model > View menu activation"""
-        self.model_builder.view_button.clicked()
+        builder = self.model_builder
+        if builder is None:
+            return
+        builder.request_view()
 
     def _on_menu_export(self, menuitem) -> None:
         """Handle Model > Export menu activation"""
-        if not self.model_builder.build_model():
+        builder = self.model_builder
+        if builder is None:
+            return
+        if not builder.build_model():
             return
 
-        model_name = self.model_builder.get_selected_model_name() or "model"
-        model = self.model_builder.get_current_model()
+        model_name = builder.get_selected_model_name() or "model"
+        model = builder.get_current_model()
         result = ask_export_file(self, model_name)
 
         if result is None:
@@ -219,13 +313,15 @@ class CadQueryApp(Gtk.Window):
         try:
             if fmt == "step":
                 step_exporter.export(model, filename)
+            elif isinstance(model, cq.Assembly):
+                cadmodeldata_exporter.export(model, filename)
             else:
                 cadmodeldata_exporter.export(
                     model,
                     filename,
                     name=model_name,
-                    parameters=self.model_builder.get_current_build_params(),
-                    param_signature=self.model_builder.get_current_build_signature(),
+                    parameters=builder.get_current_build_params(),
+                    param_signature=builder.get_current_build_signature(),
                 )
             self.status_label.set_text(f"Exported to {Path(filename).name}")
             self._show_info("Export Successful", f"Model exported to:\n{filename}")
@@ -248,14 +344,17 @@ class CadQueryApp(Gtk.Window):
             self.status_label.set_text("Mesh creation cancelled")
             return
 
-        if not self.model_builder.build_model():
+        builder = self.model_builder
+        if builder is None:
+            return
+        if not builder.build_model():
             return
 
         # Finalize any previously held mesh
         self._finalize_current_mesh()
 
-        model = self.model_builder.get_current_model()
-        model_name = self.model_builder.get_selected_model_name() or "model"
+        model = builder.get_current_model()
+        model_name = builder.get_selected_model_name() or "model"
 
         self.status_label.set_text("Generating mesh...")
         while Gtk.events_pending():
@@ -273,7 +372,7 @@ class CadQueryApp(Gtk.Window):
 
         self._current_mesh = mesh
         self._current_mesh_stats = stats
-        self._update_mesh_menu_sensitivity()
+        self._sync_menu_sensitivity()
 
         summary = (
             f"Nodes: {stats['node_count']}, "
@@ -292,13 +391,17 @@ class CadQueryApp(Gtk.Window):
 
         ugrid = self._current_mesh.get_pyvista_mesh()
 
-        self.model_builder.set_sensitive_controls(False)
-        self._set_menu_sensitive(False)
+        self.parts_builder.set_sensitive_controls(False)
+        self.assemblies_builder.set_sensitive_controls(False)
+        self.notebook.set_sensitive(False)
+        self._sync_menu_sensitivity(enabled=False)
         self.status_label.set_text("Mesh viewer open - close viewer window to continue")
 
         if not show_mesh(ugrid, on_closed=self._on_viewer_closed, on_error=self._on_viewer_error):
-            self.model_builder.set_sensitive_controls(True)
-            self._set_menu_sensitive(True)
+            self.parts_builder.set_sensitive_controls(True)
+            self.assemblies_builder.set_sensitive_controls(True)
+            self.notebook.set_sensitive(True)
+            self._sync_menu_sensitivity()
             self.status_label.set_text("Error: Failed to load mesh")
 
     def _on_menu_save_mesh(self, menuitem) -> None:
@@ -306,7 +409,10 @@ class CadQueryApp(Gtk.Window):
         if self._current_mesh is None:
             return
 
-        model_name = self.model_builder.get_selected_model_name() or "model"
+        builder = self.model_builder
+        model_name = "model"
+        if builder is not None:
+            model_name = builder.get_selected_model_name() or model_name
         result = ask_save_mesh_file(self, model_name)
         if result is None:
             self.status_label.set_text("Mesh save cancelled")
@@ -380,50 +486,62 @@ class CadQueryApp(Gtk.Window):
             self._current_mesh = None
             self._current_mesh_stats = None
 
-    def _update_mesh_menu_sensitivity(self) -> None:
-        """Update View Mesh / Save Mesh sensitivity based on stored mesh"""
-        has_mesh = self._current_mesh is not None
-        self.menu_view_mesh.set_sensitive(has_mesh)
-        self.menu_save_mesh.set_sensitive(has_mesh)
-        self.menu_show_stats.set_sensitive(has_mesh)
+    def _sync_menu_sensitivity(
+        self,
+        enabled: bool = True,
+        builder: Optional[ModelBuilder] = None,
+    ) -> None:
+        """Update every menu item from current model and mesh state.
 
-    def _set_menu_sensitive(self, sensitive: bool) -> None:
-        """Enable/disable all menu items, respecting model/mesh state"""
-        has_model = self.model_builder.get_selected_model_name() is not None
+        Args:
+            enabled: When False, all items are forced off regardless of
+                state (used while a viewer is open).
+            builder: The ModelBuilder to read model state from. Defaults to
+                the active tab (which may be ``None`` if the active tab is
+                not a ModelBuilder, in which case all model-related items
+                are disabled). Pass an explicit builder when called from
+                inside a ``switch-page`` handler, where the
+                ``model_builder`` property has not yet committed to the new
+                page.
+        """
+        if builder is None:
+            builder = self.model_builder
+        has_model = (
+            builder is not None
+            and builder.get_selected_model_name() is not None
+        )
         has_mesh = self._current_mesh is not None
-        self.menu_view.set_sensitive(sensitive and has_model)
-        self.menu_export.set_sensitive(sensitive and has_model)
-        self.menu_create_mesh.set_sensitive(sensitive and has_model)
-        self.menu_view_mesh.set_sensitive(sensitive and has_mesh)
-        self.menu_save_mesh.set_sensitive(sensitive and has_mesh)
-        self.menu_show_stats.set_sensitive(sensitive and has_mesh)
+        self.menu_view.set_sensitive(enabled and has_model)
+        self.menu_export.set_sensitive(enabled and has_model)
+        self.menu_create_mesh.set_sensitive(enabled and has_model)
+        self.menu_view_mesh.set_sensitive(enabled and has_mesh)
+        self.menu_save_mesh.set_sensitive(enabled and has_mesh)
+        self.menu_show_stats.set_sensitive(enabled and has_mesh)
 
     def _on_params_changed(self, builder) -> None:
         """Clear stored mesh when model parameters change"""
         self._finalize_current_mesh()
-        self._update_mesh_menu_sensitivity()
+        self._sync_menu_sensitivity()
 
-    def _on_model_type_changed(self, combo) -> None:
+    def _on_model_type_changed(self, builder, name: str) -> None:
         """Clear stored mesh when model type selection changes"""
         self._finalize_current_mesh()
-        self._update_mesh_menu_sensitivity()
+        self._sync_menu_sensitivity()
 
     def _on_destroy(self, window) -> None:
         """Clean up mesh resources on window destroy"""
         self._finalize_current_mesh()
 
     def _on_status_changed(self, builder, message: str) -> None:
-        """Handle status change from ModelBuilder"""
+        """Handle status change from ModelBuilder.
+
+        Filters out emissions from the inactive tab so they don't overwrite
+        the active tab's status display.
+        """
+        if builder is not self.model_builder:
+            return
         self.status_label.set_text(message)
-        # Sync menu sensitivity with builder state
-        has_model = self.model_builder.get_selected_model_name() is not None
-        has_mesh = self._current_mesh is not None
-        self.menu_view.set_sensitive(has_model)
-        self.menu_export.set_sensitive(has_model)
-        self.menu_create_mesh.set_sensitive(has_model)
-        self.menu_view_mesh.set_sensitive(has_mesh)
-        self.menu_save_mesh.set_sensitive(has_mesh)
-        self.menu_show_stats.set_sensitive(has_mesh)
+        self._sync_menu_sensitivity()
 
     def _show_info(self, title: str, message: str) -> None:
         """Show info dialog"""

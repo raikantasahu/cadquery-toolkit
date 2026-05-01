@@ -40,24 +40,37 @@ class ModelBuilder(Gtk.Box):
         'view-requested': (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         'status-changed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         'params-changed': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'model-type-changed': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, model_functions: Optional[Dict[str, Callable]] = None):
+    def __init__(
+        self,
+        model_functions: Optional[Dict[str, Callable]] = None,
+        kind_label: str = "Model Type",
+    ):
         """
         Initialize the ModelBuilder widget.
 
         Args:
             model_functions: Dictionary of {name: function} for available models.
-                            If None, will attempt to load from models module.
+                            If None, will attempt to load from models.parts.
+            kind_label: Bold label shown next to the selection combo box —
+                e.g. "Part" or "Assembly" depending on which registry the
+                widget wraps. Cosmetic only; defaults to "Model Type".
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
 
         # State
         self.functions = model_functions or {}
+        self.kind_label = kind_label
         self.param_entries = {}
         self.current_model = None
         self.current_build_params = {}
         self.current_build_sig = None
+        # Last value passed to _emit_status; used by callers (e.g. a parent
+        # notebook) to restore this widget's status when it becomes visible
+        # again after another tab held focus.
+        self.last_status_message = ""
 
         # Load models if not provided
         if not self.functions:
@@ -80,7 +93,7 @@ class ModelBuilder(Gtk.Box):
         selection_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
 
         type_label = Gtk.Label()
-        type_label.set_markup('<b>Model Type:</b>')
+        type_label.set_markup(f'<b>{self.kind_label}:</b>')
         selection_box.pack_start(type_label, False, False, 0)
 
         self.function_combo = Gtk.ComboBoxText()
@@ -227,6 +240,7 @@ class ModelBuilder(Gtk.Box):
     def _on_function_changed(self, combo) -> None:
         """Handle model type selection"""
         func_name = combo.get_active_text()
+        self.emit('model-type-changed', func_name or "")
         if not func_name:
             return
 
@@ -347,7 +361,9 @@ class ModelBuilder(Gtk.Box):
         self.clear()
 
     def _emit_status(self, message: str) -> None:
-        """Emit status-changed signal"""
+        """Emit status-changed signal and record it as this widget's last
+        status, so a parent can restore it on later focus."""
+        self.last_status_message = message
         self.emit('status-changed', message)
 
     # Public API
@@ -371,6 +387,12 @@ class ModelBuilder(Gtk.Box):
     def build_model(self) -> bool:
         """Public wrapper around _build_model(). Returns True on success."""
         return self._build_model()
+
+    def request_view(self) -> None:
+        """Trigger the View action programmatically (equivalent to clicking
+        the View Model button). Builds the model and, on success, emits
+        ``view-requested``."""
+        self._on_view_clicked(None)
 
     def set_sensitive_controls(self, sensitive: bool) -> None:
         """Enable or disable all controls"""
