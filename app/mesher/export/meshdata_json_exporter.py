@@ -7,7 +7,7 @@ Must be called while Gmsh is initialized and a mesh has been generated.
 
 import json
 
-from .meshdata import collect
+from .meshdata import SCHEMA, VERSION, collect
 
 
 def save_as_meshdata_json(filename: str, mesh_id: int = 1,
@@ -26,6 +26,8 @@ def save_as_meshdata_json(filename: str, mesh_id: int = 1,
     data = collect(mesh_id=mesh_id, owner=owner, entity_owners=entity_owners)
 
     mesh = {
+        "schema": SCHEMA,
+        "version": VERSION,
         "id": data.mesh_id,
         "owner": data.owner,
         "nodes": [

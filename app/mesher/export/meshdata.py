@@ -14,6 +14,12 @@ from typing import Dict, List, Optional, Tuple
 
 import gmsh
 
+# Schema identifier + version stamped at the top of every MeshData file
+# (JSON key/value, XML root attributes). Bump VERSION when the on-disk
+# layout changes in a way readers need to discriminate.
+SCHEMA = "rsa.mesh"
+VERSION = 1
+
 # Gmsh element type codes to MeshData element type names (PascalCase,
 # matching the C# ElementType enum in RSA.Mesh).
 GMSH_TO_ELEMENT_TYPE = {

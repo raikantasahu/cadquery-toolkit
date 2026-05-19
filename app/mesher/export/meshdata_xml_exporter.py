@@ -7,7 +7,7 @@ Must be called while Gmsh is initialized and a mesh has been generated.
 
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 
-from .meshdata import collect
+from .meshdata import SCHEMA, VERSION, collect
 
 
 def save_as_meshdata_xml(filename: str, mesh_id: int = 1,
@@ -25,7 +25,11 @@ def save_as_meshdata_xml(filename: str, mesh_id: int = 1,
     """
     data = collect(mesh_id=mesh_id, owner=owner, entity_owners=entity_owners)
 
-    root = Element("Mesh", id=str(data.mesh_id), owner=data.owner)
+    root = Element(
+        "Mesh",
+        schema=SCHEMA, version=str(VERSION),
+        id=str(data.mesh_id), owner=data.owner,
+    )
 
     # --- Nodes ---
     nodes_el = SubElement(root, "Nodes", count=str(len(data.nodes)))
