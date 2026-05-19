@@ -7,15 +7,18 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
 
-# Each filter entry is (display_name, [glob_patterns...]).
+# Each filter entry is (display_name, [glob_patterns...], format_key).
+# format_key disambiguates filters that share an extension (e.g. two .json
+# variants); callers route on this key rather than the file extension.
 _MESH_FILTERS = [
-    ("Gmsh files (*.msh)", ["*.msh"]),
-    ("JSON files (*.json)", ["*.json"]),
+    ("Gmsh files (*.msh)", ["*.msh"], "msh"),
+    ("MeshData JSON (*.json)", ["*.json"], "meshdata_json"),
+    ("Simple JSON (*.json)", ["*.json"], "json"),
 ]
 
 _EXPORT_FILTERS = [
-    ("STEP files (*.step, *.stp)", ["*.step", "*.stp"]),
-    ("JSON files (*.json)", ["*.json"]),
+    ("STEP files (*.step, *.stp)", ["*.step", "*.stp"], "step"),
+    ("JSON files (*.json)", ["*.json"], "json"),
 ]
 
 _OPEN_FILTERS = [
@@ -66,7 +69,8 @@ def _run_dialog(title, parent, action, filters, default_name=None,
 
     # Per-type filters
     gtk_filters = []
-    for name, patterns in filters:
+    for entry in filters:
+        name, patterns = entry[0], entry[1]
         f = _make_filter(name, patterns)
         dialog.add_filter(f)
         gtk_filters.append(f)
@@ -74,7 +78,7 @@ def _run_dialog(title, parent, action, filters, default_name=None,
     # "All supported" catch-all filter
     all_filter = _make_filter(
         "All supported formats",
-        [p for _, pats in filters for p in pats],
+        [p for entry in filters for p in entry[1]],
     )
     dialog.add_filter(all_filter)
 
@@ -86,8 +90,8 @@ def _run_dialog(title, parent, action, filters, default_name=None,
     # Auto-swap extension when user switches filter
     if swap_ext:
         ext_for_filter = {}
-        for f, (_, patterns) in zip(gtk_filters, filters):
-            ext_for_filter[id(f)] = patterns[0].lstrip("*")
+        for f, entry in zip(gtk_filters, filters):
+            ext_for_filter[id(f)] = entry[1][0].lstrip("*")
 
         def _on_filter_changed(dlg, _pspec):
             new_ext = ext_for_filter.get(id(dlg.get_filter()))
@@ -121,25 +125,37 @@ def _run_dialog(title, parent, action, filters, default_name=None,
     return filename, idx
 
 
-def _ensure_extension(filename, filters, selected_idx):
+def _ensure_extension(filters, filename, selected_idx):
     """Append a default extension if the filename lacks a recognised one.
 
-    Returns (filename, fmt) where fmt is the bare extension (e.g. "msh").
+    Returns (filename, fmt_key) where fmt_key is the third element of the
+    selected filter entry (e.g. "msh", "json", "meshdata_json").
+
+    When several filters share an extension the user-selected filter
+    decides; if the user picked the "All supported" catch-all
+    (selected_idx is None) we fall back to the first filter that matches
+    the extension on disk, then to the first filter overall.
     """
     lower = filename.lower()
 
-    # All known extensions from the filter specs
-    all_exts = [p.lstrip("*") for _, pats in filters for p in pats]
+    if selected_idx is not None:
+        # User picked a specific filter — append its default extension
+        # if missing, but trust the user's choice for the format key.
+        entry = filters[selected_idx]
+        ext = entry[1][0].lstrip("*")
+        if not any(lower.endswith(p.lstrip("*")) for p in entry[1]):
+            filename = filename + ext
+        return filename, entry[2]
 
-    for ext in all_exts:
-        if lower.endswith(ext):
-            return filename, ext.lstrip(".")
-
-    # No recognised extension — use the selected filter's default,
-    # or the first filter if "All" was selected.
-    idx = selected_idx if selected_idx is not None else 0
-    ext = filters[idx][1][0].lstrip("*")
-    return filename + ext, ext.lstrip(".")
+    # "All supported" was active — pick the first filter whose extension
+    # matches the typed filename; otherwise fall back to the first filter.
+    for entry in filters:
+        for pat in entry[1]:
+            if lower.endswith(pat.lstrip("*")):
+                return filename, entry[2]
+    entry = filters[0]
+    ext = entry[1][0].lstrip("*")
+    return filename + ext, entry[2]
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -168,8 +184,8 @@ def ask_save_mesh_file(parent, default_name):
         default_name: Default filename stem (without extension).
 
     Returns:
-        Tuple of (filepath, format) where format is "msh" or "json",
-        or None if cancelled.
+        Tuple of (filepath, format) where format is one of "msh",
+        "meshdata_json", or "json", or None if cancelled.
     """
     filename, idx = _run_dialog(
         "Save Mesh File", parent,
@@ -178,7 +194,7 @@ def ask_save_mesh_file(parent, default_name):
     )
     if filename is None:
         return None
-    return _ensure_extension(filename, _MESH_FILTERS, idx)
+    return _ensure_extension(_MESH_FILTERS, filename, idx)
 
 
 def ask_export_file(parent, default_name):
@@ -199,4 +215,4 @@ def ask_export_file(parent, default_name):
     )
     if filename is None:
         return None
-    return _ensure_extension(filename, _EXPORT_FILTERS, idx)
+    return _ensure_extension(_EXPORT_FILTERS, filename, idx)

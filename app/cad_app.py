@@ -24,7 +24,10 @@ from converter import (
     part_to_modeldata, assembly_to_modeldata,
 )
 from exporter import cadmodeldata_exporter, step_exporter
-from mesher import HAS_GMSH, create_mesh, save_mesh, save_mesh_json
+from mesher import (
+    HAS_GMSH, create_mesh, save_mesh, save_mesh_json,
+    save_mesh_meshdata_json,
+)
 from dialogs import ask_save_mesh_file, ask_export_file, ask_mesh_settings
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
@@ -421,7 +424,11 @@ class CadQueryApp(Gtk.Window):
         filename, fmt = result
 
         try:
-            if fmt == "json":
+            if fmt == "meshdata_json":
+                save_mesh_meshdata_json(
+                    self._current_mesh, filename, owner=model_name,
+                )
+            elif fmt == "json":
                 save_mesh_json(self._current_mesh, filename, title=model_name)
             else:
                 save_mesh(self._current_mesh, filename)

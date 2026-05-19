@@ -187,6 +187,17 @@ def save_mesh_json(mesher, filename, title=None):
     mesher.save_as_json(filename, title=title)
 
 
+def save_mesh_meshdata_json(mesher, filename, owner=None):
+    """Save a generated mesh to a MeshData JSON file.
+
+    Args:
+        mesher: A GmshMesher instance returned by create_mesh().
+        filename: Output file path (should end with .json).
+        owner: Optional owner string for the mesh envelope.
+    """
+    mesher.save_as_meshdata_json(filename, owner=owner)
+
+
 def gmsh_to_pyvista() -> pv.UnstructuredGrid:
     """Extract the current Gmsh model mesh as a PyVista UnstructuredGrid.
 
