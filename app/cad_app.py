@@ -34,6 +34,7 @@ from dialogs import (
 )
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
+from viewer.model_viewer import enumerate_part_labels
 
 from models.parts import get_all_parts
 from models.assemblies import get_all_assemblies
@@ -519,7 +520,7 @@ class CadQueryApp(Gtk.Window):
 
         filename, fmt = result
 
-        entity_owners = dict(self._picked_faces) if self._picked_faces else None
+        entity_owners = self._build_entity_owners(builder) if fmt == "meshdata_json" else None
         try:
             if fmt == "meshdata_json":
                 save_mesh_meshdata_json(
@@ -536,6 +537,41 @@ class CadQueryApp(Gtk.Window):
             return
 
         self.status_label.set_text(f"Mesh saved to {Path(filename).name}")
+
+    def _build_entity_owners(self, builder) -> Optional[dict]:
+        """Assemble the entity_owners dict passed to MeshData JSON save.
+
+        Picked-face ``Fn`` entries come from the model viewer's picker;
+        ``Pn`` entries are auto-filled from the current model's part
+        labels (same DFS order used by ``create_polydatas_per_part``) so
+        per-part MeshFragments come out named without the user having to
+        author a YAML config. Returns ``None`` when nothing to attach.
+        """
+        owners: dict = {}
+        if self._picked_faces:
+            owners.update(self._picked_faces)
+
+        if builder is not None:
+            model = builder.get_current_model()
+            try:
+                if isinstance(model, cq.Assembly):
+                    model_data = assembly_to_modeldata(model)
+                else:
+                    model_data = part_to_modeldata(
+                        model,
+                        name=builder.get_selected_model_name() or "model",
+                        parameters=builder.get_current_build_params(),
+                        param_signature=builder.get_current_build_signature(),
+                    )
+                labels = enumerate_part_labels(model_data.to_dict())
+            except Exception:
+                # If label enumeration fails, fall through with what we have
+                # (the mesher will apply "part_{n+1}" defaults per volume).
+                labels = []
+            for i, label in enumerate(labels):
+                owners.setdefault(f"P{i}", label)
+
+        return owners or None
 
     def _on_menu_show_stats(self, menuitem) -> None:
         """Handle Mesh > Show Stats menu activation"""

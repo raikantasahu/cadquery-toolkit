@@ -103,9 +103,13 @@ def collect(mesh_id: int = 1, owner: str = "model",
         owner: Owner string for the mesh and its fragments.
         entity_owners: Optional mapping from CADModelData PersistentID
             to owner string, e.g. ``{"V0": "Vertex 1001",
-            "E0": "Edge 2001", "F0": "Face 3001"}``.  Gmsh entity
-            tags are converted to PersistentIDs via the offset
-            (tag 1 → V0/E0/F0).  Entities without a mapping are skipped.
+            "E0": "Edge 2001", "F0": "Face 3001",
+            "P0": "lap_plate_1"}``.  Gmsh entity tags are converted to
+            PersistentIDs via the offset (tag 1 → V0/E0/F0/P0).
+            V/E/F entries become MeshEntityContainers (entities without
+            a mapping are skipped). P entries name the per-volume
+            MeshFragments; volumes without a P mapping fall back to
+            ``"part_{n+1}"`` (1-based iteration order).
 
     Returns:
         MeshData with all collected data.
@@ -123,31 +127,40 @@ def collect(mesh_id: int = 1, owner: str = "model",
             z=float(coords[3 * i + 2]),
         ))
 
-    # --- Fragments (one per Gmsh 3D element type) ---
-    elem_types, _, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
+    # --- Fragments (one per (Gmsh volume, element type)) ---
+    # Splitting per volume lets an assembly mesh carry one fragment per
+    # Part. Owner comes from entity_owners["P{tag-1}"] when provided,
+    # else falls back to a generated "part_{n+1}" label (1-based in
+    # iteration order) so parts can still be told apart in the output.
     fragments = []
     global_elem_id = 1
+    volumes = gmsh.model.getEntities(dim=3)
 
-    for etype, enodes in zip(elem_types, elem_node_tags):
-        type_name = GMSH_TO_ELEMENT_TYPE.get(int(etype))
-        if type_name is None:
-            continue
-        props = gmsh.model.mesh.getElementProperties(int(etype))
-        nodes_per_elem = props[3]
-        num_elems = len(enodes) // nodes_per_elem
+    for n, (_dim, vol_tag) in enumerate(volumes):
+        pid = f"P{vol_tag - 1}"
+        frag_owner = entity_owners.get(pid, f"part_{n + 1}")
 
-        elements = []
-        for i in range(num_elems):
-            start = i * nodes_per_elem
-            end = start + nodes_per_elem
-            elements.append(MeshElement(
-                id=global_elem_id,
-                nodes=[int(n) for n in enodes[start:end]],
+        elem_types, _, elem_node_tags = gmsh.model.mesh.getElements(3, vol_tag)
+        for etype, enodes in zip(elem_types, elem_node_tags):
+            type_name = GMSH_TO_ELEMENT_TYPE.get(int(etype))
+            if type_name is None:
+                continue
+            props = gmsh.model.mesh.getElementProperties(int(etype))
+            nodes_per_elem = props[3]
+            num_elems = len(enodes) // nodes_per_elem
+
+            elements = []
+            for i in range(num_elems):
+                start = i * nodes_per_elem
+                end = start + nodes_per_elem
+                elements.append(MeshElement(
+                    id=global_elem_id,
+                    nodes=[int(n) for n in enodes[start:end]],
+                ))
+                global_elem_id += 1
+            fragments.append(MeshFragment(
+                element_type=type_name, owner=frag_owner, elements=elements,
             ))
-            global_elem_id += 1
-        fragments.append(MeshFragment(
-            element_type=type_name, owner=owner, elements=elements,
-        ))
 
     # --- Boundary edges per geometric curve ---
     edges_per_curve: Dict[int, List[int]] = {}

@@ -249,6 +249,54 @@ def create_polydata_from_model_data(
     return mesh
 
 
+def enumerate_part_labels(data: Dict[str, Any]) -> List[str]:
+    """Return per-part labels in the same DFS order as create_polydatas_per_part.
+
+    Each label is the leaf model's componentName/modelName with a ``#N``
+    suffix for repeats. Lightweight (no triangulation) so callers can
+    use it to build ``entity_owners["P{n}"]`` mappings that line up
+    with the mesher's per-volume MeshFragments.
+
+    Returns an empty list when ``data`` has no parts with geometry.
+    """
+    labels: List[str] = []
+    label_counts: Dict[str, int] = {}
+
+    def _label_for(model: Dict[str, Any]) -> str:
+        name = (
+            _ci_get(model, "componentName")
+            or _ci_get(model, "modelName")
+            or "part"
+        )
+        name = str(name)
+        label_counts[name] = label_counts.get(name, 0) + 1
+        n = label_counts[name]
+        return name if n == 1 else f"{name} #{n}"
+
+    def _walk(models, model_index, visited):
+        if model_index in visited:
+            return
+        visited = visited | {model_index}
+        model = models[model_index]
+        if _ci_get(model, "faceList"):
+            labels.append(_label_for(model))
+        for component in _ci_get(model, "childComponents") or []:
+            child_index = int(_ci_get(component, "childIndex", 0) or 0)
+            if child_index < 0 or child_index >= len(models):
+                continue
+            _walk(models, child_index, visited)
+
+    models = _ci_get(data, "models")
+    if isinstance(models, list) and models:
+        root_index = int(_ci_get(data, "rootIndex", 0) or 0)
+        if 0 <= root_index < len(models):
+            _walk(models, root_index, visited=set())
+    elif _ci_get(data, "faceList"):
+        labels.append(_label_for(data))
+
+    return labels
+
+
 def create_polydatas_per_part(
     data: Dict[str, Any], with_face_index: bool = False,
 ) -> List[tuple]:
