@@ -187,15 +187,37 @@ def save_mesh_json(mesher, filename, title=None):
     mesher.save_as_json(filename, title=title)
 
 
-def save_mesh_meshdata_json(mesher, filename, owner=None):
+def save_mesh_meshdata_json(mesher, filename, owner=None,
+                            entity_owners=None):
     """Save a generated mesh to a MeshData JSON file.
 
     Args:
         mesher: A GmshMesher instance returned by create_mesh().
         filename: Output file path (should end with .json).
         owner: Optional owner string for the mesh envelope.
+        entity_owners: Optional ``{persistent_id: owner_string}`` mapping
+            (e.g. ``{"F0": "Face 1"}``); each entry becomes one
+            MeshEntityContainer in the output.
     """
-    mesher.save_as_meshdata_json(filename, owner=owner)
+    mesher.save_as_meshdata_json(
+        filename, owner=owner, entity_owners=entity_owners,
+    )
+
+
+def save_mesh_meshdata_xml(mesher, filename, owner=None, entity_owners=None):
+    """Save a generated mesh to a MeshData XML file.
+
+    Args:
+        mesher: A GmshMesher instance returned by create_mesh().
+        filename: Output file path (should end with .xml).
+        owner: Optional owner string for the mesh envelope.
+        entity_owners: Optional ``{persistent_id: owner_string}`` mapping
+            (e.g. ``{"F0": "Face 1"}``); each entry becomes one
+            MeshEntityContainer in the output.
+    """
+    mesher.save_as_meshdata_xml(
+        filename, owner=owner, entity_owners=entity_owners,
+    )
 
 
 def gmsh_to_pyvista() -> pv.UnstructuredGrid:

@@ -28,7 +28,10 @@ from mesher import (
     HAS_GMSH, create_mesh, save_mesh, save_mesh_json,
     save_mesh_meshdata_json,
 )
-from dialogs import ask_save_mesh_file, ask_export_file, ask_mesh_settings
+from dialogs import (
+    ask_save_mesh_file, ask_export_file, ask_mesh_settings,
+    edit_face_selection,
+)
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
 
@@ -52,6 +55,10 @@ class CadQueryApp(Gtk.Window):
         # Mesh state
         self._current_mesh = None
         self._current_mesh_stats = None
+        # Face picks: list of (persistent_id, owner_label) tuples.
+        # Populated by the model viewer's pick mode; consumed by the
+        # MeshData save flow as entity_owners. Cleared on model change.
+        self._picked_faces: list = []
         self.connect("destroy", self._on_destroy)
 
         # Check dependencies
@@ -106,6 +113,10 @@ class CadQueryApp(Gtk.Window):
         # Keep references to menu items for sensitivity control
         self.menu_view = builder.get_object("menu_view")
         self.menu_export = builder.get_object("menu_export")
+        self.menu_pick_faces = builder.get_object("menu_pick_faces")
+        self.menu_edit_face_selection = builder.get_object(
+            "menu_edit_face_selection"
+        )
         self.menu_create_mesh = builder.get_object("menu_create_mesh")
         self.menu_view_mesh = builder.get_object("menu_view_mesh")
         self.menu_save_mesh = builder.get_object("menu_save_mesh")
@@ -218,6 +229,7 @@ class CadQueryApp(Gtk.Window):
         `get_current_page()` at the time this signal fires.
         """
         self._finalize_current_mesh()
+        self._picked_faces = []
         builder = notebook.get_nth_page(page_num)
         self._sync_menu_sensitivity(builder=builder)
         status = builder.last_status_message
@@ -294,6 +306,90 @@ class CadQueryApp(Gtk.Window):
         if builder is None:
             return
         builder.request_view()
+
+    def _on_menu_pick_faces(self, menuitem) -> None:
+        """Handle Model > Pick Faces menu activation.
+
+        Builds the current model, opens the viewer in face-pick mode,
+        and stores the returned selection on the app for later use by
+        the MeshData save flow.
+        """
+        builder = self.model_builder
+        if builder is None:
+            return
+        if not builder.build_model():
+            return
+
+        model = builder.get_current_model()
+        try:
+            if isinstance(model, cq.Assembly):
+                model_data = assembly_to_modeldata(model)
+            else:
+                model_data = part_to_modeldata(
+                    model,
+                    name=builder.get_selected_model_name() or "model",
+                    parameters=builder.get_current_build_params(),
+                    param_signature=builder.get_current_build_signature(),
+                )
+        except Exception as e:
+            self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
+            self.status_label.set_text("Error: Conversion failed")
+            return
+
+        viewer = ModelViewer()
+        viewer.connect('viewer-closed', lambda v: self._on_pick_viewer_closed(v))
+        viewer.connect('error', lambda v, msg: self._on_viewer_error(msg))
+
+        if not viewer.set_mesh_from_dict(
+            model_data.to_dict(), with_face_index=True,
+        ):
+            self.status_label.set_text("Error: Failed to load model")
+            return
+
+        self.parts_builder.set_sensitive_controls(False)
+        self.assemblies_builder.set_sensitive_controls(False)
+        self.notebook.set_sensitive(False)
+        self._sync_menu_sensitivity(enabled=False)
+        self.status_label.set_text(
+            "Face picker open — press 'p' over a face to pick/unpick. "
+            "Close window when done."
+        )
+
+        viewer.show_viewer(
+            title="Pick Faces",
+            pick_faces=True,
+            initial_picks=self._picked_faces,
+        )
+
+    def _on_pick_viewer_closed(self, viewer) -> None:
+        """Called when the pick-mode viewer is closed; commits the picks."""
+        self._picked_faces = list(viewer.picked_faces)
+        self.parts_builder.set_sensitive_controls(True)
+        self.assemblies_builder.set_sensitive_controls(True)
+        self.notebook.set_sensitive(True)
+        self._sync_menu_sensitivity()
+        self.present()
+        n = len(self._picked_faces)
+        if n:
+            self.status_label.set_text(
+                f"Face picker closed. {n} face{'s' if n != 1 else ''} selected."
+            )
+        else:
+            self.status_label.set_text("Face picker closed. No faces selected.")
+
+    def _on_menu_edit_face_selection(self, menuitem) -> None:
+        """Handle Model > Edit Face Selection menu activation."""
+        if not self._picked_faces:
+            return
+        edited = edit_face_selection(self, self._picked_faces)
+        if edited is None:
+            return
+        self._picked_faces = edited
+        self._sync_menu_sensitivity()
+        n = len(self._picked_faces)
+        self.status_label.set_text(
+            f"Face selection updated. {n} face{'s' if n != 1 else ''}."
+        )
 
     def _on_menu_export(self, menuitem) -> None:
         """Handle Model > Export menu activation"""
@@ -423,10 +519,12 @@ class CadQueryApp(Gtk.Window):
 
         filename, fmt = result
 
+        entity_owners = dict(self._picked_faces) if self._picked_faces else None
         try:
             if fmt == "meshdata_json":
                 save_mesh_meshdata_json(
                     self._current_mesh, filename, owner=model_name,
+                    entity_owners=entity_owners,
                 )
             elif fmt == "json":
                 save_mesh_json(self._current_mesh, filename, title=model_name)
@@ -518,21 +616,32 @@ class CadQueryApp(Gtk.Window):
             and builder.get_selected_model_name() is not None
         )
         has_mesh = self._current_mesh is not None
+        has_picks = bool(self._picked_faces)
         self.menu_view.set_sensitive(enabled and has_model)
         self.menu_export.set_sensitive(enabled and has_model)
+        self.menu_pick_faces.set_sensitive(enabled and has_model)
+        self.menu_edit_face_selection.set_sensitive(enabled and has_picks)
         self.menu_create_mesh.set_sensitive(enabled and has_model)
         self.menu_view_mesh.set_sensitive(enabled and has_mesh)
         self.menu_save_mesh.set_sensitive(enabled and has_mesh)
         self.menu_show_stats.set_sensitive(enabled and has_mesh)
 
     def _on_params_changed(self, builder) -> None:
-        """Clear stored mesh when model parameters change"""
+        """Clear stored mesh and face picks when model parameters change.
+
+        Persistent face IDs can shift when parameters alter topology
+        (e.g. a dimension change that adds or removes a fillet), so the
+        previous selection is dropped to avoid silently writing wrong
+        MeshEntityContainers.
+        """
         self._finalize_current_mesh()
+        self._picked_faces = []
         self._sync_menu_sensitivity()
 
     def _on_model_type_changed(self, builder, name: str) -> None:
-        """Clear stored mesh when model type selection changes"""
+        """Clear stored mesh and face picks when model type selection changes"""
         self._finalize_current_mesh()
+        self._picked_faces = []
         self._sync_menu_sensitivity()
 
     def _on_destroy(self, window) -> None:

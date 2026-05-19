@@ -23,6 +23,23 @@
                 <signal name="activate" handler="_on_menu_export"/>
               </object>
             </child>
+            <child>
+              <object class="GtkSeparatorMenuItem"/>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_pick_faces">
+                <property name="label">Pick Faces…</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_pick_faces"/>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_edit_face_selection">
+                <property name="label">Edit Face Selection…</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_edit_face_selection"/>
+              </object>
+            </child>
           </object>
         </child>
       </object>
