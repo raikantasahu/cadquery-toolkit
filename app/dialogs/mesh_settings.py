@@ -14,8 +14,9 @@ def ask_mesh_settings(parent):
         parent: Parent GTK window.
 
     Returns:
-        Dictionary with 'element_size' (float) and 'mesh_type' (str),
-        or None if cancelled.
+        Dictionary with 'element_size' (float), 'mesh_type' (str), and
+        'relative_sag_tolerance' (float or None for no curvature
+        refinement), or None if cancelled.
     """
     dialog = Gtk.Dialog(
         title="Mesh Settings",
@@ -72,11 +73,45 @@ def ask_mesh_settings(parent):
 
     content.pack_start(size_box, False, False, 0)
 
+    # Relative sag tolerance (optional curvature-driven refinement)
+    sag_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    sag_label = Gtk.Label(label="Sag Tolerance:")
+    sag_label.set_halign(Gtk.Align.START)
+    sag_label.set_width_chars(14)
+    sag_box.pack_start(sag_label, False, False, 0)
+
+    sag_check = Gtk.CheckButton()
+    sag_check.set_tooltip_text(
+        "Refine curved faces so the chord sag stays below this fraction "
+        "of the radius (S = δ/R). Leave unchecked to disable curvature "
+        "refinement."
+    )
+    sag_box.pack_start(sag_check, False, False, 0)
+
+    sag_adjustment = Gtk.Adjustment(value=0.01, lower=0.0001, upper=1.0,
+                                    step_increment=0.001, page_increment=0.01)
+    sag_spin = Gtk.SpinButton()
+    sag_spin.set_adjustment(sag_adjustment)
+    sag_spin.set_digits(4)
+    sag_spin.set_value(0.01)
+    sag_spin.set_sensitive(False)
+    sag_spin.set_activates_default(True)
+    sag_box.pack_start(sag_spin, True, True, 0)
+
+    sag_check.connect(
+        "toggled", lambda btn: sag_spin.set_sensitive(btn.get_active())
+    )
+
+    content.pack_start(sag_box, False, False, 0)
+
     dialog.show_all()
     response = dialog.run()
 
     element_size = element_size_spin.get_value()
     mesh_type = mesh_type_combo.get_active_text()
+    relative_sag_tolerance = (
+        sag_spin.get_value() if sag_check.get_active() else None
+    )
     dialog.destroy()
 
     if response != Gtk.ResponseType.OK:
@@ -85,4 +120,5 @@ def ask_mesh_settings(parent):
     return {
         'element_size': element_size,
         'mesh_type': mesh_type,
+        'relative_sag_tolerance': relative_sag_tolerance,
     }

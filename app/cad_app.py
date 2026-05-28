@@ -464,6 +464,7 @@ class CadQueryApp(Gtk.Window):
             mesh, stats = create_mesh(
                 model, mesh_config['mesh_type'], mesh_config['element_size'],
                 model_name=model_name,
+                relative_sag_tolerance=mesh_config['relative_sag_tolerance'],
             )
         except Exception as e:
             self._show_error("Mesh Error", f"Failed to generate mesh:\n{str(e)}")
