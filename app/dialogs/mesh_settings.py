@@ -36,24 +36,6 @@ def ask_mesh_settings(parent):
     content.set_margin_top(10)
     content.set_margin_bottom(5)
 
-    # Element size
-    size_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    size_label = Gtk.Label(label="Element Size:")
-    size_label.set_halign(Gtk.Align.START)
-    size_label.set_width_chars(14)
-    size_box.pack_start(size_label, False, False, 0)
-
-    adjustment = Gtk.Adjustment(value=5.0, lower=0.01, upper=1000.0,
-                                step_increment=0.5, page_increment=5.0)
-    element_size_spin = Gtk.SpinButton()
-    element_size_spin.set_adjustment(adjustment)
-    element_size_spin.set_digits(2)
-    element_size_spin.set_value(5.0)
-    element_size_spin.set_activates_default(True)
-    size_box.pack_start(element_size_spin, True, True, 0)
-
-    content.pack_start(size_box, False, False, 0)
-
     # Mesh type
     type_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
     type_label = Gtk.Label(label="Mesh Type:")
@@ -71,6 +53,24 @@ def ask_mesh_settings(parent):
     type_box.pack_start(mesh_type_combo, True, True, 0)
 
     content.pack_start(type_box, False, False, 0)
+
+    # Element size
+    size_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    size_label = Gtk.Label(label="Element Size:")
+    size_label.set_halign(Gtk.Align.START)
+    size_label.set_width_chars(14)
+    size_box.pack_start(size_label, False, False, 0)
+
+    adjustment = Gtk.Adjustment(value=5.0, lower=0.01, upper=1000.0,
+                                step_increment=0.5, page_increment=5.0)
+    element_size_spin = Gtk.SpinButton()
+    element_size_spin.set_adjustment(adjustment)
+    element_size_spin.set_digits(2)
+    element_size_spin.set_value(5.0)
+    element_size_spin.set_activates_default(True)
+    size_box.pack_start(element_size_spin, True, True, 0)
+
+    content.pack_start(size_box, False, False, 0)
 
     dialog.show_all()
     response = dialog.run()
