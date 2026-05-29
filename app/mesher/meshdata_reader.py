@@ -5,9 +5,9 @@ Reader counterpart of :mod:`mesher.export.meshdata_json_exporter` and
 :mod:`mesher.export.meshdata_xml_exporter`.  Converts the MeshData schema
 (nodes + fragments + boundary entities) into a volumetric PyVista mesh.
 
-MeshData files preserve Gmsh's native element node ordering; for Hex20
-and Hex27 that ordering differs from VTK's, so we reorder those node
-lists on the way out to match what PyVista expects.
+MeshData files preserve Gmsh's native element node ordering; for Tet10,
+Hex20 and Hex27 that ordering differs from VTK's, so we reorder those
+node lists on the way out to match what PyVista expects.
 """
 
 import json
@@ -28,10 +28,13 @@ _ELEMENT_TYPE_TO_VTK = {
     "Hex27": 29,
 }
 
-# Gmsh→VTK node reordering for second-order hexes.  MeshData stores
+# Gmsh→VTK node reordering for second-order elements.  MeshData stores
 # Gmsh's native order; the same reorder is applied in gmsh_mesher.py
 # when going straight from a live Gmsh session to PyVista.
 _NODE_ORDER_GMSH_TO_VTK = {
+    # 10-node tet: Gmsh orders the last two mid-edges as (2,3),(1,3)
+    # but VTK wants (1,3),(2,3).
+    "Tet10": [0, 1, 2, 3, 4, 5, 6, 7, 9, 8],
     "Hex20": [0, 1, 2, 3, 4, 5, 6, 7,
               8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15],
     "Hex27": [0, 1, 2, 3, 4, 5, 6, 7,

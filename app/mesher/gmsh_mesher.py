@@ -43,10 +43,13 @@ _GMSH_TO_VTK = {
     12: 29,  # 27-node hexahedron (second order, complete)
 }
 
-# Gmsh-to-VTK node reordering for second-order hex elements.
+# Gmsh-to-VTK node reordering for second-order elements.
 # Gmsh and VTK number mid-edge and mid-face nodes differently.
 # Only element types that need reordering are listed here.
 _GMSH_TO_VTK_NODE_ORDER = {
+    # 10-node tet: corners + first four mid-edges identical; Gmsh orders
+    # the last two mid-edges as (2,3),(1,3) but VTK wants (1,3),(2,3).
+    11: [0, 1, 2, 3, 4, 5, 6, 7, 9, 8],
     # 20-node hex: corners identical, mid-edge nodes reordered
     17: [0, 1, 2, 3, 4, 5, 6, 7,
          8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15],
@@ -70,6 +73,12 @@ _GMSH_TO_NAME = {
 
 # Reverse mapping: JSON element type name → VTK cell type
 _NAME_TO_VTK = {name: _GMSH_TO_VTK[code] for code, name in _GMSH_TO_NAME.items()}
+
+# Same Gmsh→VTK node reordering as above, keyed by JSON element type name.
+_NAME_TO_VTK_NODE_ORDER = {
+    _GMSH_TO_NAME[code]: order
+    for code, order in _GMSH_TO_VTK_NODE_ORDER.items()
+}
 
 
 def mesh_json_to_pyvista(data: dict) -> pv.UnstructuredGrid:
@@ -96,6 +105,9 @@ def mesh_json_to_pyvista(data: dict) -> pv.UnstructuredGrid:
         if vtk_type is None:
             continue
         indices = [tag_to_index[str(n)] for n in elem['nodes']]
+        node_order = _NAME_TO_VTK_NODE_ORDER.get(elem['type'])
+        if node_order is not None:
+            indices = [indices[j] for j in node_order]
         cells.append(len(indices))
         cells.extend(indices)
         celltypes.append(vtk_type)
@@ -225,7 +237,7 @@ def gmsh_to_pyvista() -> pv.UnstructuredGrid:
 
     Reads nodes and 3D elements from the active Gmsh session, maps Gmsh
     element types to VTK cell types, and applies node reordering where
-    needed (hex20/hex27).
+    needed (tet10/hex20/hex27).
 
     Must be called while Gmsh is initialized and a mesh has been generated
     or loaded (before ``gmsh.finalize()``).
