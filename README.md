@@ -11,11 +11,12 @@ two sides interoperate.
 
 ## Features
 
-- **Parametric parts.** Drop a Python function into `app/models/` and it
+- **Parametric parts.** Drop a Python function into `app/models/parts/` and it
   becomes available everywhere — GUI, CLI, and assembly YAML — via auto-discovery.
-- **Declarative YAML assemblies.** Describe an assembly as a list of part
-  instances with parameters and per-instance transforms; the loader instantiates
-  each part and places it.
+- **Declarative YAML assemblies and parametric Python assemblies.** Describe an
+  assembly as a list of part instances with parameters and per-instance transforms
+  in YAML, or author a Python assembly that computes derived placements in code
+  (e.g. `bolted_single_lap_joint`). Both are auto-discovered.
 - **STEP and CADModelData export.** STEP is a passthrough to cadquery's native
   writers. JSON export goes through a `CadQuery → CADModelData` converter that
   walks topology, tessellates faces, and builds the multi-model envelope used by
@@ -25,9 +26,16 @@ two sides interoperate.
   recovered from the STEP product structure.
 - **Identity-based deduplication.** A shape used multiple times in an assembly
   produces a single PART entry referenced by multiple `Component`s.
-- **GTK GUI and three CLIs**, all sharing the same converter / exporter / viewer
-  pipeline.
-- **Optional volumetric meshing** via Gmsh (tet/hex elements, mesh JSON export).
+- **GTK GUI and four CLIs**, all sharing the same converter / exporter / mesher /
+  viewer pipeline. The GUI has Parts and Assemblies tabs and face picking in the
+  viewer for tagging mesh entity owners.
+- **Volumetric meshing** via Gmsh — tet/hex elements (`tet4`/`tet10`/`hex8`/
+  `hex20`/`hex27`), optional curvature-driven refinement via `relativeSagTolerance`
+  (max sag/radius on curved faces), and export to the `MeshData` wire format
+  (XML or JSON), legacy mesh JSON, or native Gmsh `.msh`.
+- **MeshData export.** Volumetric meshes serialize to a versioned `MeshData`
+  envelope (one `MeshFragment` per Part, boundary edges/faces, and entity
+  containers) consumed by the sibling C# `RSA.Mesh` application.
 
 ## Requirements
 
@@ -113,13 +121,34 @@ If the STEP file contains assembly structure, the output is a multi-model
 envelope with component names and per-instance transforms recovered from the
 STEP product hierarchy. Single-shape STEPs produce a one-PART envelope.
 
+### Mesh a STEP file from the CLI
+
+```bash
+python mesh_step_model.py input.step mesh_config.yaml
+python mesh_step_model.py input.step mesh_config.yaml -o output.json
+python mesh_step_model.py input.step mesh_config.yaml --name my_part
+```
+
+Mesh controls and output format come from a YAML config:
+
+```yaml
+mesh:
+  elementType: tet4             # tet4, tet10, hex8, hex20, hex27
+  elementSize: 5.0
+  relativeSagTolerance: 0.01    # optional; max sag/radius on curved faces
+
+output:
+  format: xml                   # xml, json (MeshData formats), or msh
+```
+
 ### Visualize a model or mesh
 
 ```bash
 python visualize.py model.json    # CADModelData (envelope or flat)
 python visualize.py part.step     # STEP file (assembly hierarchy preserved)
+python visualize.py mesh.xml      # MeshData XML (volumetric)
+python visualize.py mesh.json     # MeshData JSON or legacy mesh JSON
 python visualize.py mesh.msh      # Gmsh volumetric mesh
-python visualize.py mesh.json     # mesh JSON
 python visualize.py               # opens a file picker
 ```
 
@@ -127,10 +156,12 @@ python visualize.py               # opens a file picker
 
 ### Model Studio (GUI)
 
-Pick a model from the dropdown, set its parameters, and view or export it.
+Use the **Parts** tab to pick a part, or the **Assemblies** tab to pick an
+assembly; set its parameters, then view or export it.
 
 ![Model Studio with a parametric gear loaded](docs/screenshots/Model-Studio-Parametric-Gear.png)
 ![Model Studio with a cylinder-with-holes loaded](docs/screenshots/Model-Studio-cylinder-with-holes.png)
+![Model Studio with the bolted single-lap joint assembly loaded](docs/screenshots/Model-Studio-bolted-single-lap-joint.png)
 
 ### Rendered model
 
@@ -138,6 +169,7 @@ The PyVista viewer used by **Model → View** and `visualize.py`.
 
 ![Parametric gear rendered in the viewer](docs/screenshots/Model-Parametric-Gear.png)
 ![Cylinder-with-holes rendered in the viewer](docs/screenshots/Model-cylinder-with-holes.png)
+![Bolted single-lap joint rendered in the viewer](docs/screenshots/Model-bolted-single-lap-joint.png)
 
 ### Volumetric meshing
 
@@ -156,6 +188,7 @@ app/
   cad_app.py                # GTK GUI entry point
   build_assembly.py         # CLI: YAML assembly → STEP / CADModelData
   step_to_cadmodeldata.py   # CLI: STEP file → CADModelData JSON
+  mesh_step_model.py        # CLI: STEP file + YAML config → MeshData / .msh
   visualize.py              # CLI: open viewer for any supported format
   assembly.py               # YAML assembly loader
 
@@ -177,6 +210,9 @@ app/
 
   viewer/                   # PyVista viewer
   mesher/                   # Gmsh volumetric mesh generation
+    gmsh_mesher.py          #   mesh generation + curvature refinement
+    meshdata_reader.py      #   MeshData JSON/XML → PyVista
+    export/                 #   MeshData collection + XML/JSON exporters
   widgets/                  # GTK widgets (model builder, etc.)
   dialogs/                  # GTK file/settings dialogs
 ```
@@ -215,6 +251,41 @@ Property names are camelCase. `modelTypeValue` is the enum name string
 (`"PART"` / `"ASSEMBLY"`) for readability. The C# reader is configured with
 `PropertyNameCaseInsensitive = true` and `JsonStringEnumConverter`, so the
 envelope round-trips between the Python writer and C# reader.
+
+## MeshData format
+
+Volumetric meshes serialize to a separate `MeshData` wire format, available in
+both JSON and XML and consumed by the sibling C# `RSA.Mesh` application. Every
+file is stamped with a schema identifier and version (`schema: "rsa.mesh"`,
+`version: 1`) so readers can discriminate layout changes:
+
+```json
+{
+  "schema": "rsa.mesh",
+  "version": 1,
+  "id": "mesh",
+  "owner": "model",
+  "nodes": [ { "id": 1, "location": [0.0, 0.0, 0.0] }, ... ],
+  "fragments": [
+    {
+      "elementType": "Tet4",
+      "owner": "plate",
+      "elements": [ { "id": 1, "nodes": [1, 2, 3, 4] }, ... ]
+    },
+    ...
+  ],
+  "boundaryEdges": [ ... ],
+  "boundaryFaces": [ ... ],
+  "meshEntityContainers": [ ... ]
+}
+```
+
+A mesh is split into one `MeshFragment` per Part, each tagged with the element
+type (PascalCase, matching the C# `ElementType` enum — `Tet4`, `Hex8`, `Tet10`,
+`Hex20`, `Hex27`, `Wedge6`, `Pyramid5`) and an `owner`. Boundary edges/faces and
+mesh entity containers are emitted alongside the fragments; the `owner` and
+entity owners come from the mesh config (and from viewer face picking in the
+GUI). The XML format carries the same data under a `<Mesh>` root.
 
 ## License
 
