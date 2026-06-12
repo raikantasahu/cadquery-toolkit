@@ -1,10 +1,10 @@
 """Bolted single-lap joint assembly.
 
-Two ``plate_with_hole`` instances joined by one ``hex_bolt`` passing
-through aligned holes — a single-lap (two-plate, one-shear-plane)
+Two ``plate_with_hole`` instances joined by one ``double_headed_hex_bolt``
+passing through aligned holes — a single-lap (two-plate, one-shear-plane)
 configuration. The plates are stacked so their lap regions overlap; the
-bolt's shank passes through both plates from the top, with the head
-seated on the upper plate's top face.
+bolt's shank passes through both plates, with a hex head seated on each
+outer face of the stack.
 
 Geometry (units = mm, X is the load axis):
 
@@ -12,10 +12,11 @@ Geometry (units = mm, X is the load axis):
                      spans z in [0, plate_thickness].
     Plate 2 (upper): rotated 180 deg around Z so its lap end faces -X;
                      spans z in [plate_thickness, 2*plate_thickness].
-    Bolt: head bottom seated at z = 2*plate_thickness; shank extends
-          downward, passing through both plates.
+    Bolt: upper head seated on plate 2's top face (z = 2*plate_thickness);
+          shank spans the grip through both plates; lower head seated on
+          plate 1's bottom face (z = 0).
 
-Children: ``plate1``, ``plate2``, ``bolt``.
+Children: ``bottom-plate``, ``top-plate``, ``bolt``.
 
 The bolt's secondary dimensions (pitch, head width, head height) are
 derived from the bolt diameter using approximate ISO metric proportions —
@@ -31,7 +32,6 @@ def bolted_single_lap_joint(
     bolt_diameter: float = 12.0,
     lap_length: float = 50.0,
     grip_length: float = 80.0,
-    bolt_length: float = 30.0,
 ) -> cq.Assembly:
     # Imported inside the function so the assembly module's import-time
     # cost stays minimal (parts registry is only touched when the assembly
@@ -39,11 +39,11 @@ def bolted_single_lap_joint(
     from models.parts import get_part_function
 
     plate_with_hole = get_part_function("plate_with_hole")
-    hex_bolt = get_part_function("hex_bolt")
-    if plate_with_hole is None or hex_bolt is None:
+    double_headed_hex_bolt = get_part_function("double_headed_hex_bolt")
+    if plate_with_hole is None or double_headed_hex_bolt is None:
         raise RuntimeError(
             "bolted_single_lap_joint requires the parts 'plate_with_hole' "
-            "and 'hex_bolt' to be registered."
+            "and 'double_headed_hex_bolt' to be registered."
         )
 
     plate_length = grip_length + lap_length
@@ -57,9 +57,12 @@ def bolted_single_lap_joint(
         hole_diameter=bolt_diameter,
         edge_distance=half_lap,
     )
-    bolt = hex_bolt(
+    # Shank between the two heads spans the grip (both plate thicknesses)
+    # so a head seats on each outer face of the stack.
+    grip = 2 * plate_thickness
+    bolt = double_headed_hex_bolt(
         diameter=bolt_diameter,
-        length=bolt_length,
+        length=grip,
         pitch=0.15 * bolt_diameter,
         head_width=1.5 * bolt_diameter,
         head_height=0.65 * bolt_diameter,
@@ -73,7 +76,7 @@ def bolted_single_lap_joint(
     # Plate 1: unrotated, translated so its hole lands at world origin.
     assy.add(
         plate,
-        name="plate1",
+        name="bottom-plate",
         color=plate_color,
         loc=cq.Location(cq.Vector(-plate_offset_x, 0, 0)),
     )
@@ -83,7 +86,7 @@ def bolted_single_lap_joint(
     # on top of plate 1. Composition order is "rotate then translate".
     assy.add(
         plate,
-        name="plate2",
+        name="top-plate",
         color=plate_color,
         loc=(
             cq.Location(cq.Vector(plate_offset_x, 0, plate_thickness))
@@ -91,8 +94,8 @@ def bolted_single_lap_joint(
         ),
     )
 
-    # Bolt: head bottom seated at the top of plate 2; shank extends down
-    # through both plates.
+    # Bolt: upper head seated on top of plate 2; shank spans the grip and
+    # the lower head seats under plate 1 (at z = 0).
     assy.add(
         bolt,
         name="bolt",
