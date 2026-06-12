@@ -262,9 +262,13 @@ def enumerate_part_labels(data: Dict[str, Any]) -> List[str]:
     labels: List[str] = []
     label_counts: Dict[str, int] = {}
 
-    def _label_for(model: Dict[str, Any]) -> str:
+    def _label_for(model: Dict[str, Any], component_name: Any = None) -> str:
+        # Prefer the per-instance component name from the parent's
+        # childComponents entry; instanced (deduped) parts share one model
+        # whose own name can't tell the instances apart.
         name = (
-            _ci_get(model, "componentName")
+            component_name
+            or _ci_get(model, "componentName")
             or _ci_get(model, "modelName")
             or "part"
         )
@@ -273,18 +277,21 @@ def enumerate_part_labels(data: Dict[str, Any]) -> List[str]:
         n = label_counts[name]
         return name if n == 1 else f"{name} #{n}"
 
-    def _walk(models, model_index, visited):
+    def _walk(models, model_index, visited, component_name=None):
         if model_index in visited:
             return
         visited = visited | {model_index}
         model = models[model_index]
         if _ci_get(model, "faceList"):
-            labels.append(_label_for(model))
+            labels.append(_label_for(model, component_name))
         for component in _ci_get(model, "childComponents") or []:
             child_index = int(_ci_get(component, "childIndex", 0) or 0)
             if child_index < 0 or child_index >= len(models):
                 continue
-            _walk(models, child_index, visited)
+            _walk(
+                models, child_index, visited,
+                _ci_get(component, "componentName"),
+            )
 
     models = _ci_get(data, "models")
     if isinstance(models, list) and models:
@@ -324,9 +331,13 @@ def create_polydatas_per_part(
     label_counts: Dict[str, int] = {}
     global_face_counter = [0]
 
-    def _label_for(model: Dict[str, Any]) -> str:
+    def _label_for(model: Dict[str, Any], component_name: Any = None) -> str:
+        # Prefer the per-instance component name from the parent's
+        # childComponents entry; instanced (deduped) parts share one model
+        # whose own name can't tell the instances apart.
         name = (
-            _ci_get(model, "componentName")
+            component_name
+            or _ci_get(model, "componentName")
             or _ci_get(model, "modelName")
             or "part"
         )
@@ -335,7 +346,10 @@ def create_polydatas_per_part(
         n = label_counts[name]
         return name if n == 1 else f"{name} #{n}"
 
-    def _emit_part(model: Dict[str, Any], transform: List[float]) -> None:
+    def _emit_part(
+        model: Dict[str, Any], transform: List[float],
+        component_name: Any = None,
+    ) -> None:
         face_list = _ci_get(model, "faceList") or []
         if not face_list:
             return
@@ -370,14 +384,14 @@ def create_polydatas_per_part(
             )
             mesh.field_data["face_pids"] = np.asarray(face_pids, dtype=object)
 
-        parts.append((_label_for(model), mesh))
+        parts.append((_label_for(model, component_name), mesh))
 
-    def _walk(models, model_index, transform, visited):
+    def _walk(models, model_index, transform, visited, component_name=None):
         if model_index in visited:
             return
         visited = visited | {model_index}
         model = models[model_index]
-        _emit_part(model, transform)
+        _emit_part(model, transform, component_name)
         for component in _ci_get(model, "childComponents") or []:
             child_index = int(_ci_get(component, "childIndex", 0) or 0)
             if child_index < 0 or child_index >= len(models):
@@ -386,7 +400,10 @@ def create_polydatas_per_part(
                 _ci_get(component, "transformToParent") or _identity_matrix()
             )
             child_world = _matmul4(transform, child_local)
-            _walk(models, child_index, child_world, visited)
+            _walk(
+                models, child_index, child_world, visited,
+                _ci_get(component, "componentName"),
+            )
 
     models = _ci_get(data, "models")
     if isinstance(models, list) and models:

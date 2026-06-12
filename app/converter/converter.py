@@ -213,6 +213,7 @@ def assembly_to_modeldata(
             Component(
                 TransformToParent=_location_to_matrix(child.loc),
                 ChildModelData=part,
+                ComponentName=child.name or "part",
             )
         )
 

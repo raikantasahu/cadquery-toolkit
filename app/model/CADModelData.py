@@ -282,11 +282,18 @@ class Component:
 
     Holds the per-instance 4x4 transform that maps the child's local frame
     into the parent's frame, plus a reference to the child model itself.
+
+    ``ComponentName`` is the per-instance name of this placement (e.g.
+    ``"bottom-plate"``, ``"top-plate"``). It is distinct from the child
+    model's own ``ModelName``/``ComponentName``: when the same geometry is
+    instanced multiple times, every Component shares one ChildModelData but
+    carries its own ComponentName, so consumers can label instances apart.
     """
     TransformToParent: List[float] = field(default_factory=_identity_matrix)
     ChildModelData: "CADModelData" = field(
         default_factory=lambda: CADModelData()
     )
+    ComponentName: str = ""
 
     def __post_init__(self):
         if len(self.TransformToParent) != 16:
@@ -466,6 +473,7 @@ class CADModelData:
                 {
                     "transformToParent": list(c.TransformToParent),
                     "childIndex": identity_map[id(c.ChildModelData)],
+                    "componentName": c.ComponentName,
                 }
                 for c in self.ChildComponents
             ],
@@ -539,6 +547,7 @@ class CADModelData:
                     Component(
                         TransformToParent=list(transform),
                         ChildModelData=models[child_index],
+                        ComponentName=_ci_get(comp, "ComponentName", "") or "",
                     )
                 )
 
