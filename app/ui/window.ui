@@ -40,6 +40,20 @@
                 <signal name="activate" handler="_on_menu_edit_face_selection"/>
               </object>
             </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_pick_vertices">
+                <property name="label">Pick Vertices…</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_pick_vertices"/>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_edit_vertex_selection">
+                <property name="label">Edit Vertex Selection…</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_edit_vertex_selection"/>
+              </object>
+            </child>
           </object>
         </child>
       </object>

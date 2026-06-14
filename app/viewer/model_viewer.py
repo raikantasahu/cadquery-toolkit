@@ -330,6 +330,11 @@ def create_polydatas_per_part(
     parts: List[tuple] = []
     label_counts: Dict[str, int] = {}
     global_face_counter = [0]
+    # Topological vertices are numbered globally in the same traversal order
+    # as faces (V0, V1, …) so they line up with the mesher's flat Gmsh
+    # vertex-tag enumeration after STEP import — the same assumption faces
+    # rely on via global_face_counter.
+    global_vertex_counter = [0]
 
     def _label_for(model: Dict[str, Any], component_name: Any = None) -> str:
         # Prefer the per-instance component name from the parent's
@@ -383,6 +388,27 @@ def create_polydatas_per_part(
                 cell_face_index, dtype=np.int32,
             )
             mesh.field_data["face_pids"] = np.asarray(face_pids, dtype=object)
+            # Stash this part's topological vertices (corner points, not the
+            # tessellation vertices above) so the vertex picker can render and
+            # pick them. Points are flattened (N*3,) and reshaped on read; the
+            # parallel vertex_pids give N and the global V{n} ids.
+            vtx_pids: List[str] = []
+            vtx_xyz: List[List[float]] = []
+            for vtx in _ci_get(model, "vertexList") or []:
+                loc = _ci_get(vtx, "location")
+                if not loc or len(loc) != 3:
+                    continue
+                vtx_pids.append(f"V{global_vertex_counter[0]}")
+                global_vertex_counter[0] += 1
+                vtx_xyz.append([float(loc[0]), float(loc[1]), float(loc[2])])
+            if vtx_xyz:
+                pts_world = _transform_points(
+                    np.asarray(vtx_xyz, dtype=np.float64), transform,
+                )
+                mesh.field_data["vertex_points"] = pts_world.flatten()
+                mesh.field_data["vertex_pids"] = np.asarray(
+                    vtx_pids, dtype=object,
+                )
 
         parts.append((_label_for(model, component_name), mesh))
 
@@ -430,17 +456,18 @@ BACKGROUND_COLOR = '#1a1a1a'
 PICK_HIGHLIGHT_COLOR = '#ffeb3b'
 
 
-def _next_auto_pick_number(picks: List[tuple]) -> int:
+def _next_auto_pick_number(picks: List[tuple], prefix: str = "Face") -> int:
     """Pick a counter start so new auto-labels don't collide with existing ones.
 
-    Existing labels of the form ``"Face N"`` (the picker's default) seed
-    the counter to max(N)+1; non-matching labels (e.g. user-renamed
-    "Top surface") are ignored. Returns 1 when ``picks`` is empty.
+    Existing labels of the form ``"{prefix} N"`` (the picker's default, e.g.
+    ``"Face N"`` or ``"Vertex N"``) seed the counter to max(N)+1; non-matching
+    labels (e.g. user-renamed "Top surface") are ignored. Returns 1 when
+    ``picks`` is empty.
     """
     used = []
     for _pid, label in picks:
         parts = str(label).split()
-        if len(parts) == 2 and parts[0] == "Face" and parts[1].isdigit():
+        if len(parts) == 2 and parts[0] == prefix and parts[1].isdigit():
             used.append(int(parts[1]))
     return (max(used) + 1) if used else 1
 
@@ -598,23 +625,164 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
     plotter.add_key_event('p', _on_pick_key)
 
 
-def _add_visibility_checkboxes(plotter, part_entries):
+def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
+    """Wire up vertex picking across multiple part point-cloud actors.
+
+    Mirror of ``_setup_multi_face_picking`` for topological vertices: each
+    part contributes a points actor with one VTK point per CAD vertex. The
+    user presses 'p' with the cursor over a vertex to toggle it; a
+    vtkPointPicker maps the click to the nearest point id, which indexes the
+    parallel ``vertex_pids`` list. Picks accumulate as ``(pid, label)`` in
+    ``pick_state['picks']`` with auto labels ``Vertex N``.
+
+    Args:
+        plotter: The active pv.Plotter.
+        vertex_entries: List of ``(label, actor, points, vertex_pids)`` where
+            ``points`` is an (N,3) ndarray and ``vertex_pids`` the parallel
+            ``V{n}`` id list.
+        pick_state: Dict with a ``picks`` list of ``(pid, label)``.
+    """
+    import vtk
+
+    picker = vtk.vtkPointPicker()
+    picker.SetTolerance(0.01)
+
+    # vtkActor → (points ndarray (N,3), vertex_pids list)
+    actor_lookup: Dict[Any, tuple] = {}
+    for _label, actor, points, vpids in vertex_entries:
+        actor_lookup[actor] = (np.asarray(points, dtype=np.float64), vpids)
+
+    # Per-pid highlight + label actors, so toggling off can remove both.
+    pid_to_actors: Dict[str, tuple] = {}
+    next_pick_n = [_next_auto_pick_number(pick_state['picks'], prefix="Vertex")]
+
+    def _overlay_text() -> str:
+        if not pick_state['picks']:
+            return ("Vertex picker: 'p' over a vertex to pick/unpick.\n"
+                    "Use the checkboxes on the left to hide/show parts.\n"
+                    "No vertices picked yet.")
+        lines = ["Picked vertices ('p' to toggle):"]
+        for pid, label in pick_state['picks']:
+            lines.append(f"  {label}  [{pid}]")
+        return "\n".join(lines)
+
+    text_actor = plotter.add_text(
+        _overlay_text(), position='upper_right', font_size=10,
+        color='yellow', shadow=True,
+    )
+
+    def _refresh_overlay():
+        text_actor.SetInput(_overlay_text())
+        plotter.render()
+
+    def _add_highlight(actor, vidx: int, pid: str, label: str) -> bool:
+        points, _vpids = actor_lookup[actor]
+        if vidx < 0 or vidx >= len(points):
+            return False
+        loc = points[vidx]
+        # A larger highlight sphere sits on the picked vertex; a billboarded
+        # label floats at the same spot so the overlay's "Vertex N" can be
+        # located on the model. Named so it can be removed reliably.
+        sub_actor = plotter.add_points(
+            np.asarray([loc], dtype=np.float64),
+            color=PICK_HIGHLIGHT_COLOR, render_points_as_spheres=True,
+            point_size=20, pickable=False,
+        )
+        label_name = f"vtx_pick_label_{pid}"
+        plotter.add_point_labels(
+            [loc.tolist()],
+            [label],
+            font_size=14,
+            text_color='black',
+            shape='rect',
+            shape_color=PICK_HIGHLIGHT_COLOR,
+            shape_opacity=0.85,
+            show_points=False,
+            always_visible=True,
+            reset_camera=False,
+            name=label_name,
+        )
+        pid_to_actors[pid] = (sub_actor, label_name)
+        return True
+
+    def _toggle(actor, vidx: int) -> None:
+        info = actor_lookup.get(actor)
+        if info is None:
+            return
+        _points, vpids = info
+        if vidx < 0 or vidx >= len(vpids):
+            return
+        pid = vpids[vidx]
+        if pid in pid_to_actors:
+            sub_actor, label_name = pid_to_actors.pop(pid)
+            plotter.remove_actor(sub_actor)
+            plotter.remove_actor(label_name)
+            pick_state['picks'] = [
+                (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
+            ]
+        else:
+            label = f"Vertex {next_pick_n[0]}"
+            if not _add_highlight(actor, vidx, pid, label):
+                return
+            next_pick_n[0] += 1
+            pick_state['picks'].append((pid, label))
+        _refresh_overlay()
+
+    # Re-highlight any picks the caller passed in (reopening shows the
+    # existing selection with its original labels).
+    pid_to_location: Dict[str, tuple] = {}
+    for actor, (_points, vpids) in actor_lookup.items():
+        for idx, pid in enumerate(vpids):
+            pid_to_location[pid] = (actor, idx)
+    for pid, label in pick_state['picks']:
+        loc = pid_to_location.get(pid)
+        if loc is not None:
+            actor, idx = loc
+            _add_highlight(actor, idx, pid, label)
+
+    def _on_pick_key():
+        x, y = _vtk_interactor(plotter).GetEventPosition()
+        picker.Pick(x, y, 0, plotter.renderer)
+        point_id = picker.GetPointId()
+        if point_id < 0:
+            return
+        actor = picker.GetActor()
+        if actor is None or actor not in actor_lookup:
+            return
+        _toggle(actor, int(point_id))
+
+    plotter.add_key_event('p', _on_pick_key)
+
+
+def _add_visibility_checkboxes(plotter, part_entries,
+                               extra_actors_by_label=None):
     """Add a column of checkbox widgets to toggle each part's visibility.
 
     Each part actor gets one checkbox; clicking it flips the actor's
     visibility. Labels are added as text actors next to each checkbox.
 
+    ``extra_actors_by_label`` optionally maps a part label to a second actor
+    (e.g. the part's vertex point-cloud in vertex-pick mode) that is toggled
+    in lockstep with the part actor, so hiding a part also hides — and, since
+    VTK pickers honor visibility, un-picks — its vertices.
+
     PyVista positions widgets in pixel coordinates with origin at the
     lower-left of the render window, so the column grows upward from
     near the bottom. The starting ``y`` is set above the help-text band.
     """
+    extra_actors_by_label = extra_actors_by_label or {}
     button_size = 18
     pad = 6
     y = 50
     for label, actor, _mesh in part_entries:
-        def _make_cb(a=actor):
+        extra_actor = extra_actors_by_label.get(label)
+
+        def _make_cb(a=actor, extra=extra_actor):
             def cb(state):
-                a.SetVisibility(1 if state else 0)
+                v = 1 if state else 0
+                a.SetVisibility(v)
+                if extra is not None:
+                    extra.SetVisibility(v)
                 plotter.render()
             return cb
         plotter.add_checkbox_button_widget(
@@ -637,9 +805,10 @@ def _add_visibility_checkboxes(plotter, part_entries):
         y += button_size + pad
 
 
-def show_pick_viewer(parts, title="Pick Faces", pick_state=None):
+def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
+                     pick_mode="faces"):
     """Open a PyVista viewer with per-part actors, visibility toggles, and
-    face picking.
+    face or vertex picking.
 
     Args:
         parts: List of ``(label, pv.PolyData)`` from
@@ -648,6 +817,10 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None):
         pick_state: Required dict with a ``picks`` list; the caller
             reads ``picks`` (list of ``(pid, label)``) after the window
             closes.
+        pick_mode: ``"faces"`` (default) picks CAD faces; ``"vertices"``
+            renders each part's topological vertices as a pickable point
+            cloud (faces become non-pickable context) and picks those. In
+            both modes the pick key is ``'p'``.
 
     This is a blocking call — it returns when the viewer window is closed.
     """
@@ -735,12 +908,40 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None):
     plotter.add_key_event('t', lambda: _view('top'))
     plotter.add_key_event('u', lambda: _view('bottom'))
 
-    _add_visibility_checkboxes(plotter, part_entries)
-    if pick_state is not None:
+    # In vertex mode, build a pickable point cloud per part (faces become
+    # context only) BEFORE the checkboxes, so each checkbox can toggle the
+    # part's faces and its vertices together.
+    vertex_entries: List[tuple] = []
+    vertex_actor_by_label: Dict[str, Any] = {}
+    if pick_state is not None and pick_mode == "vertices":
+        for label, actor, mesh in part_entries:
+            actor.PickableOff()
+            vp = mesh.field_data.get("vertex_points")
+            vpids = mesh.field_data.get("vertex_pids")
+            if vp is None or vpids is None or len(vpids) == 0:
+                continue
+            points = np.asarray(vp, dtype=np.float64).reshape(-1, 3)
+            vtx_actor = plotter.add_points(
+                points, color='#ff5252', render_points_as_spheres=True,
+                point_size=11,
+            )
+            vertex_actor_by_label[label] = vtx_actor
+            vertex_entries.append(
+                (label, vtx_actor, points, [str(p) for p in vpids]),
+            )
+
+    _add_visibility_checkboxes(
+        plotter, part_entries, extra_actors_by_label=vertex_actor_by_label,
+    )
+
+    if pick_state is not None and pick_mode == "vertices":
+        _setup_multi_vertex_picking(plotter, vertex_entries, pick_state)
+    elif pick_state is not None:
         _setup_multi_face_picking(plotter, part_entries, pick_state)
 
+    pick_help = "P=Pick vertex" if pick_mode == "vertices" else "P=Pick face"
     plotter.add_text(
-        "Views: F/B/L/G/T/U  R=Reset  P=Pick face  Q=Quit",
+        f"Views: F/B/L/G/T/U  R=Reset  {pick_help}  Q=Quit",
         position='lower_left',
         font_size=8,
         color='white',
@@ -983,7 +1184,8 @@ class ModelViewer(GObject.Object):
 
     def show_viewer(self, title: str = "CAD Model Viewer",
                     pick_faces: bool = False,
-                    initial_picks: Optional[List[tuple]] = None) -> None:
+                    initial_picks: Optional[List[tuple]] = None,
+                    pick_mode: str = "faces") -> None:
         """
         Open the 3D viewer window.
 
@@ -991,12 +1193,13 @@ class ModelViewer(GObject.Object):
 
         Args:
             title: Window title.
-            pick_faces: When True, enable face picking on the displayed
-                CAD model. After the viewer closes, ``picked_faces``
+            pick_faces: When True, enable picking on the displayed CAD model.
+                After the viewer closes, ``picked_faces``/``picked_vertices``
                 holds the user's selection as ``[(persistent_id, label)]``.
             initial_picks: Optional list of ``(persistent_id, label)`` to
-                pre-populate; only respected when ``pick_faces`` is True
-                and the mesh carries face indices.
+                pre-populate; only respected when ``pick_faces`` is True.
+            pick_mode: ``"faces"`` (default) or ``"vertices"`` — which entity
+                type to pick. Only meaningful when ``pick_faces`` is True.
         """
         if self._mesh is None and self._parts is None:
             self.emit('error', "No mesh loaded. Call set_mesh_from_dict() first.")
@@ -1012,6 +1215,7 @@ class ModelViewer(GObject.Object):
             if pick_faces and self._parts is not None:
                 show_pick_viewer(
                     self._parts, title=title, pick_state=pick_state,
+                    pick_mode=pick_mode,
                 )
             else:
                 show_pyvista(
@@ -1075,9 +1279,21 @@ class ModelViewer(GObject.Object):
 
     @property
     def picked_faces(self) -> List[tuple]:
-        """Return the most recent face picks as ``[(persistent_id, label)]``.
+        """Return the most recent picks as ``[(persistent_id, label)]``.
 
-        Empty if the viewer was never run in ``pick_faces=True`` mode.
+        Empty if the viewer was never run in ``pick_faces=True`` mode. A
+        viewer instance runs a single pick mode, so this returns whatever
+        was picked (faces in face mode); ``picked_vertices`` is an alias for
+        use after a ``pick_mode="vertices"`` run.
+        """
+        return list(self._last_picks)
+
+    @property
+    def picked_vertices(self) -> List[tuple]:
+        """Return the most recent picks after a ``pick_mode="vertices"`` run.
+
+        Alias of the same underlying ``_last_picks`` (a viewer instance only
+        ever runs one pick mode), named for clarity at the call site.
         """
         return list(self._last_picks)
 

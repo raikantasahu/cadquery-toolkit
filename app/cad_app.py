@@ -56,10 +56,13 @@ class CadQueryApp(Gtk.Window):
         # Mesh state
         self._current_mesh = None
         self._current_mesh_stats = None
-        # Face picks: list of (persistent_id, owner_label) tuples.
-        # Populated by the model viewer's pick mode; consumed by the
+        # Face / vertex picks: lists of (persistent_id, owner_label) tuples.
+        # Populated by the model viewer's pick modes; both consumed by the
         # MeshData save flow as entity_owners. Cleared on model change.
+        # Kept separate so each picker pre-populates and edits only its own
+        # entity type (F* and V* keys never collide in entity_owners).
         self._picked_faces: list = []
+        self._picked_vertices: list = []
         self.connect("destroy", self._on_destroy)
 
         # Check dependencies
@@ -117,6 +120,10 @@ class CadQueryApp(Gtk.Window):
         self.menu_pick_faces = builder.get_object("menu_pick_faces")
         self.menu_edit_face_selection = builder.get_object(
             "menu_edit_face_selection"
+        )
+        self.menu_pick_vertices = builder.get_object("menu_pick_vertices")
+        self.menu_edit_vertex_selection = builder.get_object(
+            "menu_edit_vertex_selection"
         )
         self.menu_create_mesh = builder.get_object("menu_create_mesh")
         self.menu_view_mesh = builder.get_object("menu_view_mesh")
@@ -231,6 +238,7 @@ class CadQueryApp(Gtk.Window):
         """
         self._finalize_current_mesh()
         self._picked_faces = []
+        self._picked_vertices = []
         builder = notebook.get_nth_page(page_num)
         self._sync_menu_sensitivity(builder=builder)
         status = builder.last_status_message
@@ -309,11 +317,38 @@ class CadQueryApp(Gtk.Window):
         builder.request_view()
 
     def _on_menu_pick_faces(self, menuitem) -> None:
-        """Handle Model > Pick Faces menu activation.
+        """Handle Model > Pick Faces menu activation."""
+        self._open_pick_viewer(
+            pick_mode="faces",
+            title="Pick Faces",
+            status_text=(
+                "Face picker open — press 'p' over a face to pick/unpick. "
+                "Close window when done."
+            ),
+            initial_picks=self._picked_faces,
+            on_closed=self._on_pick_faces_viewer_closed,
+        )
 
-        Builds the current model, opens the viewer in face-pick mode,
-        and stores the returned selection on the app for later use by
-        the MeshData save flow.
+    def _on_menu_pick_vertices(self, menuitem) -> None:
+        """Handle Model > Pick Vertices menu activation."""
+        self._open_pick_viewer(
+            pick_mode="vertices",
+            title="Pick Vertices",
+            status_text=(
+                "Vertex picker open — press 'p' over a vertex to pick/unpick. "
+                "Close window when done."
+            ),
+            initial_picks=self._picked_vertices,
+            on_closed=self._on_pick_vertices_viewer_closed,
+        )
+
+    def _open_pick_viewer(self, pick_mode, title, status_text,
+                          initial_picks, on_closed) -> None:
+        """Build the current model and open the viewer in a pick mode.
+
+        Shared by the face and vertex pickers — they differ only in mode,
+        window title, status text, the pre-populated selection, and the
+        close handler that commits the result.
         """
         builder = self.model_builder
         if builder is None:
@@ -338,7 +373,7 @@ class CadQueryApp(Gtk.Window):
             return
 
         viewer = ModelViewer()
-        viewer.connect('viewer-closed', lambda v: self._on_pick_viewer_closed(v))
+        viewer.connect('viewer-closed', lambda v: on_closed(v))
         viewer.connect('error', lambda v, msg: self._on_viewer_error(msg))
 
         if not viewer.set_mesh_from_dict(
@@ -351,32 +386,43 @@ class CadQueryApp(Gtk.Window):
         self.assemblies_builder.set_sensitive_controls(False)
         self.notebook.set_sensitive(False)
         self._sync_menu_sensitivity(enabled=False)
-        self.status_label.set_text(
-            "Face picker open — press 'p' over a face to pick/unpick. "
-            "Close window when done."
-        )
+        self.status_label.set_text(status_text)
 
         viewer.show_viewer(
-            title="Pick Faces",
+            title=title,
             pick_faces=True,
-            initial_picks=self._picked_faces,
+            initial_picks=initial_picks,
+            pick_mode=pick_mode,
         )
 
-    def _on_pick_viewer_closed(self, viewer) -> None:
-        """Called when the pick-mode viewer is closed; commits the picks."""
+    def _on_pick_faces_viewer_closed(self, viewer) -> None:
+        """Commit face picks when the face picker closes."""
         self._picked_faces = list(viewer.picked_faces)
+        self._finish_pick_viewer("face", "faces", len(self._picked_faces))
+
+    def _on_pick_vertices_viewer_closed(self, viewer) -> None:
+        """Commit vertex picks when the vertex picker closes."""
+        self._picked_vertices = list(viewer.picked_vertices)
+        self._finish_pick_viewer(
+            "vertex", "vertices", len(self._picked_vertices),
+        )
+
+    def _finish_pick_viewer(self, singular: str, plural: str, n: int) -> None:
+        """Restore UI sensitivity and report the count after a picker closes."""
         self.parts_builder.set_sensitive_controls(True)
         self.assemblies_builder.set_sensitive_controls(True)
         self.notebook.set_sensitive(True)
         self._sync_menu_sensitivity()
         self.present()
-        n = len(self._picked_faces)
         if n:
+            noun = singular if n == 1 else plural
             self.status_label.set_text(
-                f"Face picker closed. {n} face{'s' if n != 1 else ''} selected."
+                f"{singular.capitalize()} picker closed. {n} {noun} selected."
             )
         else:
-            self.status_label.set_text("Face picker closed. No faces selected.")
+            self.status_label.set_text(
+                f"{singular.capitalize()} picker closed. No {plural} selected."
+            )
 
     def _on_menu_edit_face_selection(self, menuitem) -> None:
         """Handle Model > Edit Face Selection menu activation."""
@@ -390,6 +436,23 @@ class CadQueryApp(Gtk.Window):
         n = len(self._picked_faces)
         self.status_label.set_text(
             f"Face selection updated. {n} face{'s' if n != 1 else ''}."
+        )
+
+    def _on_menu_edit_vertex_selection(self, menuitem) -> None:
+        """Handle Model > Edit Vertex Selection menu activation."""
+        if not self._picked_vertices:
+            return
+        edited = edit_face_selection(
+            self, self._picked_vertices, title="Edit Vertex Selection",
+        )
+        if edited is None:
+            return
+        self._picked_vertices = edited
+        self._sync_menu_sensitivity()
+        n = len(self._picked_vertices)
+        self.status_label.set_text(
+            f"Vertex selection updated. {n} "
+            f"{'vertex' if n == 1 else 'vertices'}."
         )
 
     def _on_menu_export(self, menuitem) -> None:
@@ -551,6 +614,8 @@ class CadQueryApp(Gtk.Window):
         owners: dict = {}
         if self._picked_faces:
             owners.update(self._picked_faces)
+        if self._picked_vertices:
+            owners.update(self._picked_vertices)
 
         if builder is not None:
             model = builder.get_current_model()
@@ -654,10 +719,15 @@ class CadQueryApp(Gtk.Window):
         )
         has_mesh = self._current_mesh is not None
         has_picks = bool(self._picked_faces)
+        has_vertex_picks = bool(self._picked_vertices)
         self.menu_view.set_sensitive(enabled and has_model)
         self.menu_export.set_sensitive(enabled and has_model)
         self.menu_pick_faces.set_sensitive(enabled and has_model)
         self.menu_edit_face_selection.set_sensitive(enabled and has_picks)
+        self.menu_pick_vertices.set_sensitive(enabled and has_model)
+        self.menu_edit_vertex_selection.set_sensitive(
+            enabled and has_vertex_picks
+        )
         self.menu_create_mesh.set_sensitive(enabled and has_model)
         self.menu_view_mesh.set_sensitive(enabled and has_mesh)
         self.menu_save_mesh.set_sensitive(enabled and has_mesh)
@@ -673,12 +743,14 @@ class CadQueryApp(Gtk.Window):
         """
         self._finalize_current_mesh()
         self._picked_faces = []
+        self._picked_vertices = []
         self._sync_menu_sensitivity()
 
     def _on_model_type_changed(self, builder, name: str) -> None:
         """Clear stored mesh and face picks when model type selection changes"""
         self._finalize_current_mesh()
         self._picked_faces = []
+        self._picked_vertices = []
         self._sync_menu_sensitivity()
 
     def _on_destroy(self, window) -> None:

@@ -1,9 +1,10 @@
 """
-face_selection.py - Dialog for editing the picked-face list.
+face_selection.py - Dialog for editing a picked-entity list.
 
 Lets the user rename or remove entries from the list returned by the
-model viewer's face picker, before they flow into a MeshData save as
-MeshEntityContainers.
+model viewer's face or vertex picker, before they flow into a MeshData
+save as MeshEntityContainers. The dialog is entity-agnostic — it edits
+``[(persistent_id, label)]`` rows; only the window title differs.
 """
 
 from typing import List, Optional, Tuple
@@ -16,18 +17,21 @@ from gi.repository import Gtk
 def edit_face_selection(
     parent: Optional[Gtk.Window],
     picks: List[Tuple[str, str]],
+    title: str = "Edit Face Selection",
 ) -> Optional[List[Tuple[str, str]]]:
-    """Show a dialog to rename or remove entries in a face-pick list.
+    """Show a dialog to rename or remove entries in a picked-entity list.
 
     Args:
         parent: Parent GTK window.
         picks: Current picks as ``[(persistent_id, owner_label), ...]``.
+        title: Window title (e.g. ``"Edit Vertex Selection"`` when editing
+            vertex picks). The dialog is otherwise entity-agnostic.
 
     Returns:
         The edited list on OK, or ``None`` on cancel.
     """
     dialog = Gtk.Dialog(
-        title="Edit Face Selection", transient_for=parent, flags=0,
+        title=title, transient_for=parent, flags=0,
     )
     dialog.add_buttons(
         Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
