@@ -65,6 +65,9 @@ class CadQueryApp(Gtk.Window):
         self._picked_vertices: list = []
         # Single cap face (persistent_id, label) for extruded hex, or None.
         self._cap_face: tuple = None
+        # Last-used Mesh Settings, persisted across dialog invocations for the
+        # same model; reset to None (dialog defaults) when the model changes.
+        self._mesh_settings: dict = None
         self.connect("destroy", self._on_destroy)
 
         # Check dependencies
@@ -242,6 +245,7 @@ class CadQueryApp(Gtk.Window):
         self._picked_faces = []
         self._picked_vertices = []
         self._cap_face = None
+        self._mesh_settings = None
         builder = notebook.get_nth_page(page_num)
         self._sync_menu_sensitivity(builder=builder)
         status = builder.last_status_message
@@ -545,10 +549,12 @@ class CadQueryApp(Gtk.Window):
             )
             return
 
-        # Settings dialog loop: the dialog's "Pick…" button closes the dialog
-        # with a pick request; we run the picker and reopen with all settings
-        # preserved (state) plus the newly picked cap face.
-        state = None
+        # Settings dialog loop. ``state`` starts from the persisted last-used
+        # settings, so they are restored across invocations for the same model
+        # (reset to None — dialog defaults — when the model changes). The
+        # "Pick…" button closes the dialog with a pick request; we run the
+        # picker and reopen with all settings preserved.
+        state = self._mesh_settings
         while True:
             cap_pid = self._cap_face[0] if self._cap_face else None
             mesh_config = ask_mesh_settings(self, cap_face_pid=cap_pid,
@@ -563,6 +569,9 @@ class CadQueryApp(Gtk.Window):
                 state = mesh_config
                 continue
             break
+
+        # Persist the accepted settings for the next invocation (same model).
+        self._mesh_settings = mesh_config
 
         # Build the extrusion spec when extruded hex is requested.
         extrusion = None
@@ -818,6 +827,7 @@ class CadQueryApp(Gtk.Window):
         self._picked_faces = []
         self._picked_vertices = []
         self._cap_face = None
+        self._mesh_settings = None
         self._sync_menu_sensitivity()
 
     def _on_model_type_changed(self, builder, name: str) -> None:
@@ -826,6 +836,7 @@ class CadQueryApp(Gtk.Window):
         self._picked_faces = []
         self._picked_vertices = []
         self._cap_face = None
+        self._mesh_settings = None
         self._sync_menu_sensitivity()
 
     def _on_destroy(self, window) -> None:
