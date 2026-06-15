@@ -27,7 +27,7 @@ from pathlib import Path
 import yaml
 
 from importer import step_importer
-from mesher.gmsh_mesher import GmshMesher, MeshType
+from mesher.gmsh_mesher import GmshMesher, MeshType, MeshValidationError
 
 _MESH_TYPES = {
     "tet4": MeshType.TET4,
@@ -120,11 +120,15 @@ def main():
     model = step_importer.read(str(input_path))
 
     mesher = GmshMesher(model, model_name=name)
-    stats = mesher.generate(
-        mesh_type,
-        element_size=element_size,
-        relative_sag_tolerance=relative_sag_tolerance,
-    )
+    try:
+        stats = mesher.generate(
+            mesh_type,
+            element_size=element_size,
+            relative_sag_tolerance=relative_sag_tolerance,
+        )
+    except MeshValidationError as e:
+        mesher.finalize()
+        parser.error(str(e))
 
     if stats.get("warning"):
         print(f"Warning: {stats['warning']}")

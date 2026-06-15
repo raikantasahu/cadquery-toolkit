@@ -32,6 +32,12 @@ try:
 except ImportError:
     HAS_GMSH = False
 
+
+class MeshValidationError(RuntimeError):
+    """Raised when a generated mesh fails a validity check (e.g. inverted
+    elements). Callers should surface the message to the user rather than
+    emit a known-invalid mesh."""
+
 # Gmsh element type codes to VTK cell type mapping (3D elements only)
 _GMSH_TO_VTK = {
     4: 10,   # 4-node tetrahedron
@@ -351,6 +357,7 @@ class GmshMesher:
         self._configure_mesh(mesh_type, element_size, relative_sag_tolerance)
 
         gmsh.model.mesh.generate(3)
+        self._assert_hex_valid(mesh_type)
 
         return self._collect_mesh_info(mesh_type)
 
@@ -513,6 +520,42 @@ class GmshMesher:
             gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
             gmsh.option.setNumber("Mesh.ElementOrder", 2)
             gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
+
+    # All hex types share the recombine-from-tet-subdivision path and the
+    # same curvature-under-resolution failure mode (verified for HEX8/20/27).
+    _HEX_TYPES = (MeshType.HEX8, MeshType.HEX20, MeshType.HEX27)
+
+    def _assert_hex_valid(self, mesh_type: MeshType) -> None:
+        """Fail if a hex mesh (HEX8/HEX20/HEX27) contains inverted elements.
+
+        The hex path recombines a subdivided tet mesh, which guarantees
+        all-hex *topology* but not *validity*: where the underlying tet mesh
+        is coarse in high-curvature regions, the split hexes can be inverted
+        (negative scaled Jacobian) — invalid for FEA. The root-cause fix is
+        resolution: with ``relativeSagTolerance`` (or a smaller elementSize)
+        the curvature is resolved and the inversions disappear at the source —
+        verified for all three hex orders (see docs/plans/Hex8-Mesh-Quality.md).
+        So rather than mask an under-resolved mesh, we refuse to emit it.
+        No-op for tet meshes.
+        """
+        if mesh_type not in self._HEX_TYPES:
+            return
+        tags = []
+        etypes, _, _ = gmsh.model.mesh.getElements(dim=3)
+        for et in etypes:
+            t, _ = gmsh.model.mesh.getElementsByType(int(et))
+            tags.extend(int(x) for x in t)
+        if not tags:
+            return
+        qualities = gmsh.model.mesh.getElementQualities(tags, "minSICN")
+        inverted = sum(1 for v in qualities if v < 0.0)
+        if inverted:
+            raise MeshValidationError(
+                f"{mesh_type.value} mesh has {inverted} inverted element(s) "
+                f"(negative Jacobian) of {len(tags)} — invalid for analysis. "
+                f"This is curvature under-resolution. Increase resolution: "
+                f"set relativeSagTolerance (e.g. 0.01) or reduce elementSize."
+            )
 
     def _collect_mesh_info(self, mesh_type: MeshType = None) -> dict:
         """Collect and return mesh statistics (3D elements only).
