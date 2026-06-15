@@ -102,7 +102,7 @@ def main():
                 f"(got {relative_sag_tolerance})"
             )
 
-    # Compound extrusion (swept-hex) config: cap face + through-thickness layers
+    # Compound extruded-hex config: cap face + through-thickness layers
     # always travel together. Its presence selects structured-hex meshing.
     extrusion = None
     extrusion_cfg = mesh_cfg.get("extrusion")

@@ -26,11 +26,11 @@ from converter import (
 from exporter import cadmodeldata_exporter, step_exporter
 from mesher import (
     HAS_GMSH, create_mesh, save_mesh, save_mesh_json,
-    save_mesh_meshdata_json,
+    save_mesh_meshdata_json, ExtrusionSpec,
 )
 from dialogs import (
     ask_save_mesh_file, ask_export_file, ask_mesh_settings,
-    edit_face_selection,
+    edit_face_selection, pick_entities,
 )
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
@@ -63,6 +63,8 @@ class CadQueryApp(Gtk.Window):
         # entity type (F* and V* keys never collide in entity_owners).
         self._picked_faces: list = []
         self._picked_vertices: list = []
+        # Single cap face (persistent_id, label) for extruded hex, or None.
+        self._cap_face: tuple = None
         self.connect("destroy", self._on_destroy)
 
         # Check dependencies
@@ -239,6 +241,7 @@ class CadQueryApp(Gtk.Window):
         self._finalize_current_mesh()
         self._picked_faces = []
         self._picked_vertices = []
+        self._cap_face = None
         builder = notebook.get_nth_page(page_num)
         self._sync_menu_sensitivity(builder=builder)
         status = builder.last_status_message
@@ -455,6 +458,47 @@ class CadQueryApp(Gtk.Window):
             f"{'vertex' if n == 1 else 'vertices'}."
         )
 
+    def _current_model_data(self) -> Optional[dict]:
+        """Build the active model's CADModelData dict for picking, or None.
+
+        Shared entry point for any pick-driven mesh control (see
+        ``dialogs.entity_picker.pick_entities``). Shows an error dialog and
+        returns None if there's no model or conversion fails.
+        """
+        builder = self.model_builder
+        if builder is None or not builder.build_model():
+            return None
+        model = builder.get_current_model()
+        try:
+            if isinstance(model, cq.Assembly):
+                model_data = assembly_to_modeldata(model)
+            else:
+                model_data = part_to_modeldata(
+                    model,
+                    name=builder.get_selected_model_name() or "model",
+                    parameters=builder.get_current_build_params(),
+                    param_signature=builder.get_current_build_signature(),
+                )
+        except Exception as e:
+            self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
+            return None
+        return model_data.to_dict()
+
+    def _pick_single_cap_face(self):
+        """Pick ONE cap face for extruded hex; return (pid, label) or None.
+
+        Thin wrapper over the reusable ``pick_entities`` pattern — the template
+        any future face/edge/vertex mesh-control picker should follow.
+        """
+        model_data = self._current_model_data()
+        if model_data is None:
+            return None
+        return pick_entities(
+            self, model_data, kind="face", single=True,
+            title="Pick Cap Face",
+            initial=[self._cap_face] if self._cap_face else [],
+        )
+
     def _on_menu_export(self, menuitem) -> None:
         """Handle Model > Export menu activation"""
         builder = self.model_builder
@@ -501,11 +545,39 @@ class CadQueryApp(Gtk.Window):
             )
             return
 
-        # Show mesh settings dialog
-        mesh_config = ask_mesh_settings(self)
-        if mesh_config is None:
-            self.status_label.set_text("Mesh creation cancelled")
-            return
+        # Settings dialog loop: the dialog's "Pick…" button closes the dialog
+        # with a pick request; we run the picker and reopen with all settings
+        # preserved (state) plus the newly picked cap face.
+        state = None
+        while True:
+            cap_pid = self._cap_face[0] if self._cap_face else None
+            mesh_config = ask_mesh_settings(self, cap_face_pid=cap_pid,
+                                            initial=state)
+            if mesh_config is None:
+                self.status_label.set_text("Mesh creation cancelled")
+                return
+            if mesh_config.get('_action') == 'pick_cap':
+                picked = self._pick_single_cap_face()
+                if picked is not None:
+                    self._cap_face = picked
+                state = mesh_config
+                continue
+            break
+
+        # Build the extrusion spec when extruded hex is requested.
+        extrusion = None
+        ex = mesh_config.get('extrusion')
+        if ex:
+            if not ex.get('cap_face'):
+                self._show_error(
+                    "Mesh Error",
+                    "Extruded hex needs a cap face.\n"
+                    "Click \"Pick…\" in the mesh dialog to choose one."
+                )
+                self.status_label.set_text("Error: no cap face for extrusion")
+                return
+            extrusion = ExtrusionSpec(
+                cap_face=ex['cap_face'], num_layers=ex['num_layers'])
 
         builder = self.model_builder
         if builder is None:
@@ -528,6 +600,7 @@ class CadQueryApp(Gtk.Window):
                 model, mesh_config['mesh_type'], mesh_config['element_size'],
                 model_name=model_name,
                 relative_sag_tolerance=mesh_config['relative_sag_tolerance'],
+                extrusion=extrusion,
             )
         except Exception as e:
             self._show_error("Mesh Error", f"Failed to generate mesh:\n{str(e)}")
@@ -744,6 +817,7 @@ class CadQueryApp(Gtk.Window):
         self._finalize_current_mesh()
         self._picked_faces = []
         self._picked_vertices = []
+        self._cap_face = None
         self._sync_menu_sensitivity()
 
     def _on_model_type_changed(self, builder, name: str) -> None:
@@ -751,6 +825,7 @@ class CadQueryApp(Gtk.Window):
         self._finalize_current_mesh()
         self._picked_faces = []
         self._picked_vertices = []
+        self._cap_face = None
         self._sync_menu_sensitivity()
 
     def _on_destroy(self, window) -> None:

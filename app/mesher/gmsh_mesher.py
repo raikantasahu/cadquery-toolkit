@@ -164,27 +164,27 @@ _MESH_TYPE_MAP = {
 
 @dataclass
 class ExtrusionSpec:
-    """Compound configuration for extrusion (swept) hex meshing.
+    """Compound configuration for extruded hex meshing.
 
     Describes how to build structured hexes by quad-meshing a *cap face* and
-    sweeping it through the part's thickness, instead of the indirect
+    extruding it through the part's thickness, instead of the indirect
     tet-subdivision path. The two settings always travel together:
 
-        cap_face:   PersistentID of the face to sweep from (e.g. ``"F4"``), in
+        cap_face:   PersistentID of the face to extrude from (e.g. ``"F4"``), in
                     the same ``F{n}`` scheme the face picker uses (gmsh surface
                     tag ``n + 1``). The mesher does NOT pick it — it is an input.
         num_layers: number of hex layers through the thickness.
 
     In-plane quad size comes from ``element_size`` and curved cap-edge fidelity
     from ``relative_sag_tolerance`` (applied locally to the cap), so a full
-    swept-hex job is ``ExtrusionSpec`` + those two scalars.
+    extruded-hex job is ``ExtrusionSpec`` + those two scalars.
     """
     cap_face: str
     num_layers: int = 1
 
 
 def create_mesh(model, mesh_type_str, element_size, model_name="model",
-                relative_sag_tolerance=None):
+                relative_sag_tolerance=None, extrusion=None):
     """Generate a volumetric mesh and return the mesher with statistics.
 
     Args:
@@ -194,6 +194,8 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model",
         model_name: Name used for the Gmsh model.
         relative_sag_tolerance: Optional curvature-driven refinement tolerance
             S = δ/R. See ``GmshMesher.generate``.
+        extrusion: Optional ``ExtrusionSpec`` for extruded hex8. See
+            ``GmshMesher.generate``.
 
     Returns:
         Tuple of (GmshMesher, stats_dict). The mesher holds the generated
@@ -202,7 +204,8 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model",
     mesh_type = _MESH_TYPE_MAP[mesh_type_str]
     mesher = GmshMesher(model, model_name=model_name)
     stats = mesher.generate(mesh_type, element_size,
-                            relative_sag_tolerance=relative_sag_tolerance)
+                            relative_sag_tolerance=relative_sag_tolerance,
+                            extrusion=extrusion)
     return mesher, stats
 
 
@@ -367,7 +370,7 @@ class GmshMesher:
                 π / arccos(1 − S) elements per 2π radians and relaxes the
                 minimum-size clamp so tight curves can actually refine.
             extrusion: Optional ``ExtrusionSpec``. When given, produces
-                structured HEX8 by quad-meshing the named cap face and sweeping
+                structured HEX8 by quad-meshing the named cap face and extruding
                 it through the thickness (``mesh_type`` is ignored — the result
                 is HEX8). ``element_size`` sets the in-plane quad size and
                 ``relative_sag_tolerance`` the curved cap-edge fidelity.
@@ -382,7 +385,11 @@ class GmshMesher:
         gmsh.model.add(self.model_name)
 
         if extrusion is not None:
-            return self._generate_swept(
+            if mesh_type != MeshType.HEX8:
+                raise MeshValidationError(
+                    f"extrusion produces hex8 — set mesh_type=hex8 (got "
+                    f"'{mesh_type.value}').")
+            return self._generate_extruded(
                 extrusion, element_size, relative_sag_tolerance)
 
         self._import_geometry()
@@ -393,44 +400,151 @@ class GmshMesher:
 
         return self._collect_mesh_info(mesh_type)
 
-    def _generate_swept(self, extrusion: "ExtrusionSpec",
+    def _generate_extruded(self, extrusion: "ExtrusionSpec",
                         element_size: float,
                         relative_sag_tolerance: float = None) -> dict:
-        """Structured HEX8 by quad-meshing a cap face and sweeping it.
+        """Structured HEX8 by quad-meshing a cap face and extruding it.
 
-        Imports the solid, locates the user-specified cap face, removes the
-        solid (keeping its faces), quad-meshes the cap, and extrudes it along
-        the inward normal by the part thickness with ``num_layers`` layers and
-        recombination — yielding all-hex. For a true prism the swept mesh
-        reproduces the solid; for a non-prismatic pick it will not, which is
-        the caller's responsibility (the cap face is an input, not detected).
+        Imports the solid, locates the user-specified cap face, isolates that
+        face as an independent copy, deletes the whole original solid, 2D-quad-
+        meshes the copy, and extrudes that mesh into ``num_layers`` uniform hex
+        layers along the inward normal (see :meth:`_build_extruded_volume`). For a
+        true prism the extruded mesh reproduces the solid; for a non-prismatic pick
+        it will not, which is the caller's responsibility (the cap face is an
+        input, not detected).
+
+        The original solid is removed *recursively* (not just the volume): its
+        other faces are coincident with the extruded volume's walls, and leaving
+        them around would pollute the mesh. Copying the cap first keeps a clean
+        source that survives the recursive delete.
         """
         self._import_geometry()
         cap_tag = self._surface_tag_for_pid(extrusion.cap_face)
-        vec = self._sweep_vector(cap_tag)
+        d, target_q, target_m = self._extrusion_target(cap_tag)
 
-        # Drop the solid volume(s) so only the swept mesh is generated; the
-        # cap face survives as the extrusion source.
-        gmsh.model.occ.remove(gmsh.model.getEntities(3), recursive=False)
+        # Isolate the cap, then delete the entire original solid (volume +
+        # all its faces/edges) so ONLY the cap remains to mesh and extrude.
+        cap_copy = gmsh.model.occ.copy([(2, cap_tag)])
+        gmsh.model.occ.remove(gmsh.model.getEntities(3), recursive=True)
         gmsh.model.occ.synchronize()
+        cap = cap_copy[0][1]
 
+        # 2D quad mesh of the cap, with optional curved-edge sag refinement.
         gmsh.option.setNumber("Mesh.Algorithm", 11)   # quasi-structured quad
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", element_size)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
         gmsh.option.setNumber("Mesh.ElementOrder", 1)
         if relative_sag_tolerance and relative_sag_tolerance > 0:
-            self._apply_cap_sag_field(cap_tag, element_size,
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.0)
+            self._apply_cap_sag_field(cap, element_size,
                                       relative_sag_tolerance)
+        else:
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
+        gmsh.model.mesh.setRecombine(2, cap)
+        gmsh.model.mesh.generate(2)
 
-        gmsh.model.mesh.setRecombine(2, cap_tag)
-        gmsh.model.occ.extrude(
-            [(2, cap_tag)], vec[0], vec[1], vec[2],
-            numElements=[max(1, int(extrusion.num_layers))], recombine=True,
-        )
-        gmsh.model.occ.synchronize()
-        gmsh.model.mesh.generate(3)
+        # Extrude the cap mesh into uniform hex layers. occ.extrude's numElements
+        # is only a soft hint that gmsh's 3D mesher ignores (it produces
+        # non-uniform layering), so we build the layers explicitly.
+        self._build_extruded_volume(
+            cap, d, target_q, target_m, max(1, int(extrusion.num_layers)))
+
         self._assert_hex_valid(MeshType.HEX8)
         return self._collect_mesh_info(MeshType.HEX8)
+
+    def _build_extruded_volume(self, cap: int, d, target_q, target_m,
+                               n: int) -> None:
+        """Extrude the cap's 2D mesh into ``n`` uniform layers of 3D elements.
+
+        Each cap quad becomes a column of ``n`` hexes (each cap triangle, if the
+        recombiner left any, a column of ``n`` wedges). Every cap node is
+        projected along the extrude direction ``d`` onto the opposite face's
+        plane ``(target_q, target_m)``, so the far layer lands exactly on that
+        face — and a non-parallel opposite face is handled per node (each column
+        gets its own length). Node winding is flipped when needed so every
+        element has a positive Jacobian. The result is a discrete volume.
+        """
+        qtags, qconn = gmsh.model.mesh.getElementsByType(3, cap)   # 4-node quad
+        ttags, tconn = gmsh.model.mesh.getElementsByType(2, cap)   # 3-node tri
+        qconn = (np.asarray(qconn, dtype=np.int64).reshape(-1, 4)
+                 if len(qtags) else np.empty((0, 4), dtype=np.int64))
+        tconn = (np.asarray(tconn, dtype=np.int64).reshape(-1, 3)
+                 if len(ttags) else np.empty((0, 3), dtype=np.int64))
+        if len(qconn) == 0 and len(tconn) == 0:
+            raise MeshValidationError(
+                "cap face produced no 2D mesh to extrude — check the cap face "
+                "and element size.")
+
+        used = np.unique(np.concatenate(
+            [qconn.ravel(), tconn.ravel()]).astype(np.int64))
+        idx = {int(t): i for i, t in enumerate(used)}
+        n_cap = len(used)
+        # PERF: this per-node fetch costs ~25 us/node (one Python<->gmsh
+        # round-trip each), measured linear. Negligible for typical caps
+        # (~100 nodes ~2.5 ms, ~1000 ~25 ms) and only perceptible past ~10k
+        # nodes (~40k ~0.65 s, ~200k ~3 s). If very fine caps ever matter,
+        # replace this loop with ONE batched call:
+        #   _, coords, _ = gmsh.model.mesh.getNodes(2, cap, includeBoundary=True)
+        # and build the tag->coord map from the returned arrays (~100x faster
+        # at scale; flat ~15-25 ms even at 200k nodes).
+        base = np.empty((n_cap, 3))
+        for tag in used:
+            coord, _, _, _ = gmsh.model.mesh.getNode(int(tag))
+            base[idx[int(tag)]] = coord
+
+        # Project each cap node along d onto the opposite-face plane so the far
+        # layer lands exactly on that face; ``dist`` is the per-node travel and
+        # ``disp`` the per-node displacement to the opposite face.
+        d = np.asarray(d, dtype=float)
+        target_q = np.asarray(target_q, dtype=float)
+        target_m = np.asarray(target_m, dtype=float)
+        denom = float(np.dot(d, target_m))
+        if abs(denom) < 1e-9:
+            raise MeshValidationError(
+                "extrude direction is parallel to the opposite face.")
+        dist = ((target_q - base) @ target_m) / denom
+        if np.any(dist <= 1e-9):
+            raise MeshValidationError(
+                "some cap nodes do not project onto the opposite face along the "
+                "extrude direction — check the cap/part geometry.")
+        disp = dist[:, None] * d[None, :]
+
+        # Positive-Jacobian orientation: test one cap face's winding vs d.
+        ref = qconn[0] if len(qconn) else tconn[0]
+        p0, p1, pl = (base[idx[int(ref[0])]], base[idx[int(ref[1])]],
+                      base[idx[int(ref[-1])]])
+        flip = float(np.dot(np.cross(p1 - p0, pl - p0), d)) < 0
+
+        # Layered node coordinates; node tag for cap node i at level k = k*N+i+1.
+        coords = np.empty(((n + 1) * n_cap, 3))
+        for k in range(n + 1):
+            coords[k * n_cap:(k + 1) * n_cap] = base + (k / n) * disp
+
+        gmsh.model.occ.remove([(2, cap)], recursive=True)
+        gmsh.model.occ.synchronize()
+        vol = gmsh.model.addDiscreteEntity(3)
+        node_tags = np.arange(1, (n + 1) * n_cap + 1, dtype=np.int64)
+        gmsh.model.mesh.addNodes(3, vol, node_tags, coords.ravel())
+
+        def _columns(conn):
+            cols = []
+            for row in conn:
+                b = [idx[int(x)] for x in row]
+                if flip:
+                    b = b[::-1]
+                for k in range(n):
+                    cols.append([k * n_cap + i + 1 for i in b]
+                                + [(k + 1) * n_cap + i + 1 for i in b])
+            return cols
+
+        next_tag = 1
+        for conn, etype in ((qconn, 5), (tconn, 6)):   # hex8 / wedge6
+            cols = _columns(conn)
+            if not cols:
+                continue
+            flat = np.asarray(cols, dtype=np.int64).ravel()
+            etags = np.arange(next_tag, next_tag + len(cols), dtype=np.int64)
+            next_tag += len(cols)
+            gmsh.model.mesh.addElementsByType(vol, etype, etags, flat)
 
     def _surface_tag_for_pid(self, pid: str) -> int:
         """Map a CADModelData face PersistentID ('F{n}') to its gmsh tag (n+1)."""
@@ -444,33 +558,99 @@ class GmshMesher:
                 f"capFace {pid!r} (surface tag {tag}) not found in geometry.")
         return tag
 
-    def _sweep_vector(self, cap_tag: int) -> list:
-        """Cap normal flipped to point INTO the solid, scaled by thickness.
+    @staticmethod
+    def _face_param_mid(tag: int) -> list:
+        """Parametric midpoint [u, v] of a surface, for getNormal sampling."""
+        pmin, pmax = gmsh.model.getParametrizationBounds(2, tag)
+        return [(pmin[0] + pmax[0]) / 2.0, (pmin[1] + pmax[1]) / 2.0]
 
-        Thickness is taken as 2× the cap-to-centroid distance along the normal,
-        which is exact for a prism (the solid centroid lies at mid-thickness).
+    def _extrusion_target(self, cap_tag: int):
+        """Find the extrude direction and the opposite face's plane.
+
+        Returns ``(d, Q, m)``: the unit extrude direction ``d`` (cap normal
+        pointing INTO the solid), and the opposite (target) face as a plane
+        point ``Q`` and unit normal ``m``. The target is the planar face — other
+        than the cap — whose plane is perpendicular to ``d`` (normal parallel to
+        ``d``) and that lies farthest along ``d``. Cap nodes are later projected
+        onto this plane along ``d`` so the far layer lands exactly on the face
+        (see :meth:`_build_extruded_volume`).
+
+        Auto-detected, not user-supplied: the cap plus "extrude through the
+        thickness" already determines the opposite face. Raises
+        MeshValidationError when there is no opposite planar face, or it isn't
+        congruent with the cap (the cap/part isn't a clean extrusion pair).
+
+        NOTE: Slanted opposite faces are NOT currently supported — the opposite
+        face must be parallel to the cap (normal ∥ d), so equal-area congruence
+        is valid. Supporting a slanted opposite face (detect by "faces away
+        along d" + projected-area congruence + per-node travel) is deferred to
+        the entity-container phase, together with associating boundary nodes to
+        the opposite face's edges/vertices.
         """
-        pmin, pmax = gmsh.model.getParametrizationBounds(2, cap_tag)
-        mid = [(pmin[0] + pmax[0]) / 2.0, (pmin[1] + pmax[1]) / 2.0]
-        n = np.array(gmsh.model.getNormal(cap_tag, mid)[:3], dtype=float)
-        n /= np.linalg.norm(n)
+        cap_type = gmsh.model.getType(2, cap_tag)
+        if cap_type != "Plane":
+            raise MeshValidationError(
+                f"cap face must be planar to extrude; got '{cap_type}'. Pick a "
+                f"flat face (extruding a curved face is not supported).")
+        n_cap = np.asarray(
+            gmsh.model.getNormal(cap_tag, self._face_param_mid(cap_tag))[:3],
+            dtype=float)
+        n_cap /= np.linalg.norm(n_cap)
+        cap_com = np.asarray(gmsh.model.occ.getCenterOfMass(2, cap_tag))
 
-        cap_com = np.array(gmsh.model.occ.getCenterOfMass(2, cap_tag))
-        vol = None
+        vol, vol_faces = None, []
         for _, vt in gmsh.model.getEntities(3):
             faces = [abs(t) for _, t in
                      gmsh.model.getBoundary([(3, vt)], oriented=False)]
             if cap_tag in faces:
-                vol = vt
+                vol, vol_faces = vt, faces
                 break
         if vol is None:
             raise MeshValidationError(
                 f"capFace tag {cap_tag} is not a face of any solid.")
-        into = np.array(gmsh.model.occ.getCenterOfMass(3, vol)) - cap_com
-        if np.dot(into, n) < 0:
-            n = -n
-        thickness = 2.0 * abs(float(np.dot(into, n)))
-        return (n * thickness).tolist()
+        into = np.asarray(gmsh.model.occ.getCenterOfMass(3, vol)) - cap_com
+        d = n_cap if float(np.dot(into, n_cap)) > 0 else -n_cap
+
+        # Opposite face: planar, plane perpendicular to d (normal ∥ d), farthest
+        # along d. Side walls have normals ⊥ d and are skipped.
+        target, best_reach = None, None
+        for ft in vol_faces:
+            if ft == cap_tag or gmsh.model.getType(2, ft) != "Plane":
+                continue
+            fn = np.asarray(
+                gmsh.model.getNormal(ft, self._face_param_mid(ft))[:3],
+                dtype=float)
+            fn /= np.linalg.norm(fn)
+            # Parallel-only: require the face normal ∥ d. A slanted opposite
+            # face (tilted normal) is intentionally skipped — see method note.
+            if abs(float(np.dot(fn, d))) < 0.999:
+                continue
+            reach = float(np.dot(
+                np.asarray(gmsh.model.occ.getCenterOfMass(2, ft)), d))
+            if best_reach is None or reach > best_reach:
+                best_reach, target = reach, ft
+        if target is None:
+            raise MeshValidationError(
+                "no opposite planar face found for the cap — extruded hex needs "
+                "a planar cap with a parallel opposite face (is the part "
+                "prismatic?).")
+
+        # Congruence: with a parallel opposite face (enforced above), a clean
+        # extrusion has cap and opposite face of equal area. (A slanted face
+        # would need projected area instead — deferred; see method note.)
+        cap_area = gmsh.model.occ.getMass(2, cap_tag)
+        tgt_area = gmsh.model.occ.getMass(2, target)
+        if abs(cap_area - tgt_area) > 1e-3 * max(cap_area, 1e-12):
+            raise MeshValidationError(
+                f"cap ({cap_area:.4g}) and opposite face ({tgt_area:.4g}) areas "
+                f"differ — not a clean extrusion pair (non-prismatic?).")
+
+        q = np.asarray(gmsh.model.occ.getCenterOfMass(2, target))
+        m = np.asarray(
+            gmsh.model.getNormal(target, self._face_param_mid(target))[:3],
+            dtype=float)
+        m /= np.linalg.norm(m)
+        return d, q, m
 
     def _apply_cap_sag_field(self, cap_tag: int, element_size: float,
                              sag: float) -> None:
