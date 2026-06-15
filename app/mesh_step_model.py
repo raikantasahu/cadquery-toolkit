@@ -27,7 +27,9 @@ from pathlib import Path
 import yaml
 
 from importer import step_importer
-from mesher.gmsh_mesher import GmshMesher, MeshType, MeshValidationError
+from mesher.gmsh_mesher import (
+    GmshMesher, MeshType, MeshValidationError, ExtrusionSpec,
+)
 
 _MESH_TYPES = {
     "tet4": MeshType.TET4,
@@ -100,6 +102,24 @@ def main():
                 f"(got {relative_sag_tolerance})"
             )
 
+    # Compound extrusion (swept-hex) config: cap face + through-thickness layers
+    # always travel together. Its presence selects structured-hex meshing.
+    extrusion = None
+    extrusion_cfg = mesh_cfg.get("extrusion")
+    if extrusion_cfg:
+        cap_face = extrusion_cfg.get("capFace")
+        if not cap_face:
+            parser.error("mesh.extrusion requires 'capFace' (e.g. F4)")
+        if element_type_str != "hex8":
+            parser.error(
+                "mesh.extrusion produces hex8; set elementType: hex8 "
+                f"(got '{element_type_str}')"
+            )
+        num_layers = int(extrusion_cfg.get("numLayers", 1))
+        if num_layers < 1:
+            parser.error(f"numLayers must be >= 1 (got {num_layers})")
+        extrusion = ExtrusionSpec(cap_face=str(cap_face), num_layers=num_layers)
+
     output_format = output_cfg.get("format", "msh")
     if output_format not in _FORMAT_EXTENSIONS:
         parser.error(
@@ -125,6 +145,7 @@ def main():
             mesh_type,
             element_size=element_size,
             relative_sag_tolerance=relative_sag_tolerance,
+            extrusion=extrusion,
         )
     except MeshValidationError as e:
         mesher.finalize()

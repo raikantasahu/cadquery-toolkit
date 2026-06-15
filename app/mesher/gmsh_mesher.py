@@ -22,6 +22,7 @@ import enum
 import math
 import tempfile
 import os
+from dataclasses import dataclass
 
 import numpy as np
 import pyvista as pv
@@ -159,6 +160,27 @@ _MESH_TYPE_MAP = {
     "hex20": MeshType.HEX20,
     "hex27": MeshType.HEX27,
 }
+
+
+@dataclass
+class ExtrusionSpec:
+    """Compound configuration for extrusion (swept) hex meshing.
+
+    Describes how to build structured hexes by quad-meshing a *cap face* and
+    sweeping it through the part's thickness, instead of the indirect
+    tet-subdivision path. The two settings always travel together:
+
+        cap_face:   PersistentID of the face to sweep from (e.g. ``"F4"``), in
+                    the same ``F{n}`` scheme the face picker uses (gmsh surface
+                    tag ``n + 1``). The mesher does NOT pick it — it is an input.
+        num_layers: number of hex layers through the thickness.
+
+    In-plane quad size comes from ``element_size`` and curved cap-edge fidelity
+    from ``relative_sag_tolerance`` (applied locally to the cap), so a full
+    swept-hex job is ``ExtrusionSpec`` + those two scalars.
+    """
+    cap_face: str
+    num_layers: int = 1
 
 
 def create_mesh(model, mesh_type_str, element_size, model_name="model",
@@ -331,7 +353,8 @@ class GmshMesher:
 
     def generate(self, mesh_type: MeshType = MeshType.TET4,
                  element_size: float = 5.0,
-                 relative_sag_tolerance: float = None) -> dict:
+                 relative_sag_tolerance: float = None,
+                 extrusion: "ExtrusionSpec" = None) -> dict:
         """
         Generate a volumetric mesh.
 
@@ -343,6 +366,11 @@ class GmshMesher:
                 When set, enables Gmsh's MeshSizeFromCurvature with N =
                 π / arccos(1 − S) elements per 2π radians and relaxes the
                 minimum-size clamp so tight curves can actually refine.
+            extrusion: Optional ``ExtrusionSpec``. When given, produces
+                structured HEX8 by quad-meshing the named cap face and sweeping
+                it through the thickness (``mesh_type`` is ignored — the result
+                is HEX8). ``element_size`` sets the in-plane quad size and
+                ``relative_sag_tolerance`` the curved cap-edge fidelity.
 
         Returns:
             Dictionary with mesh statistics: node_count, element_count,
@@ -353,6 +381,10 @@ class GmshMesher:
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add(self.model_name)
 
+        if extrusion is not None:
+            return self._generate_swept(
+                extrusion, element_size, relative_sag_tolerance)
+
         self._import_geometry()
         self._configure_mesh(mesh_type, element_size, relative_sag_tolerance)
 
@@ -360,6 +392,122 @@ class GmshMesher:
         self._assert_hex_valid(mesh_type)
 
         return self._collect_mesh_info(mesh_type)
+
+    def _generate_swept(self, extrusion: "ExtrusionSpec",
+                        element_size: float,
+                        relative_sag_tolerance: float = None) -> dict:
+        """Structured HEX8 by quad-meshing a cap face and sweeping it.
+
+        Imports the solid, locates the user-specified cap face, removes the
+        solid (keeping its faces), quad-meshes the cap, and extrudes it along
+        the inward normal by the part thickness with ``num_layers`` layers and
+        recombination — yielding all-hex. For a true prism the swept mesh
+        reproduces the solid; for a non-prismatic pick it will not, which is
+        the caller's responsibility (the cap face is an input, not detected).
+        """
+        self._import_geometry()
+        cap_tag = self._surface_tag_for_pid(extrusion.cap_face)
+        vec = self._sweep_vector(cap_tag)
+
+        # Drop the solid volume(s) so only the swept mesh is generated; the
+        # cap face survives as the extrusion source.
+        gmsh.model.occ.remove(gmsh.model.getEntities(3), recursive=False)
+        gmsh.model.occ.synchronize()
+
+        gmsh.option.setNumber("Mesh.Algorithm", 11)   # quasi-structured quad
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", element_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
+        gmsh.option.setNumber("Mesh.ElementOrder", 1)
+        if relative_sag_tolerance and relative_sag_tolerance > 0:
+            self._apply_cap_sag_field(cap_tag, element_size,
+                                      relative_sag_tolerance)
+
+        gmsh.model.mesh.setRecombine(2, cap_tag)
+        gmsh.model.occ.extrude(
+            [(2, cap_tag)], vec[0], vec[1], vec[2],
+            numElements=[max(1, int(extrusion.num_layers))], recombine=True,
+        )
+        gmsh.model.occ.synchronize()
+        gmsh.model.mesh.generate(3)
+        self._assert_hex_valid(MeshType.HEX8)
+        return self._collect_mesh_info(MeshType.HEX8)
+
+    def _surface_tag_for_pid(self, pid: str) -> int:
+        """Map a CADModelData face PersistentID ('F{n}') to its gmsh tag (n+1)."""
+        if not (isinstance(pid, str) and pid[:1].upper() == "F"
+                and pid[1:].isdigit()):
+            raise MeshValidationError(
+                f"capFace must be a face PersistentID like 'F4', got {pid!r}.")
+        tag = int(pid[1:]) + 1
+        if (2, tag) not in gmsh.model.getEntities(2):
+            raise MeshValidationError(
+                f"capFace {pid!r} (surface tag {tag}) not found in geometry.")
+        return tag
+
+    def _sweep_vector(self, cap_tag: int) -> list:
+        """Cap normal flipped to point INTO the solid, scaled by thickness.
+
+        Thickness is taken as 2× the cap-to-centroid distance along the normal,
+        which is exact for a prism (the solid centroid lies at mid-thickness).
+        """
+        pmin, pmax = gmsh.model.getParametrizationBounds(2, cap_tag)
+        mid = [(pmin[0] + pmax[0]) / 2.0, (pmin[1] + pmax[1]) / 2.0]
+        n = np.array(gmsh.model.getNormal(cap_tag, mid)[:3], dtype=float)
+        n /= np.linalg.norm(n)
+
+        cap_com = np.array(gmsh.model.occ.getCenterOfMass(2, cap_tag))
+        vol = None
+        for _, vt in gmsh.model.getEntities(3):
+            faces = [abs(t) for _, t in
+                     gmsh.model.getBoundary([(3, vt)], oriented=False)]
+            if cap_tag in faces:
+                vol = vt
+                break
+        if vol is None:
+            raise MeshValidationError(
+                f"capFace tag {cap_tag} is not a face of any solid.")
+        into = np.array(gmsh.model.occ.getCenterOfMass(3, vol)) - cap_com
+        if np.dot(into, n) < 0:
+            n = -n
+        thickness = 2.0 * abs(float(np.dot(into, n)))
+        return (n * thickness).tolist()
+
+    def _apply_cap_sag_field(self, cap_tag: int, element_size: float,
+                             sag: float) -> None:
+        """Refine the cap's curved boundary edges to the sag tolerance locally.
+
+        A Distance+Threshold background field sizes the curved edges to
+        ``2πR / N`` (N = elements-per-circle from the sag tolerance) while flat
+        regions stay at ``element_size``. This gives geometric fidelity on
+        holes/fillets without uniformly refining the whole cap.
+        """
+        n_per_circle = sag_tol_to_elements_per_circle(sag)
+        curved, sizes = [], []
+        for _, etag in gmsh.model.getBoundary([(2, cap_tag)], oriented=False):
+            etag = abs(etag)
+            if gmsh.model.getType(1, etag) == "Line":
+                continue
+            curved.append(etag)
+            try:
+                b = gmsh.model.getParametrizationBounds(1, etag)
+                kappa = abs(gmsh.model.getCurvature(
+                    1, etag, [(b[0][0] + b[1][0]) / 2.0])[0])
+            except Exception:
+                kappa = 0.0
+            if kappa > 1e-9:
+                sizes.append(2.0 * math.pi * (1.0 / kappa) / n_per_circle)
+        if not curved or not sizes:
+            return
+        fd = gmsh.model.mesh.field.add("Distance")
+        gmsh.model.mesh.field.setNumbers(fd, "CurvesList", curved)
+        gmsh.model.mesh.field.setNumber(fd, "Sampling", 200)
+        ft = gmsh.model.mesh.field.add("Threshold")
+        gmsh.model.mesh.field.setNumber(ft, "InField", fd)
+        gmsh.model.mesh.field.setNumber(ft, "SizeMin", min(sizes))
+        gmsh.model.mesh.field.setNumber(ft, "SizeMax", element_size)
+        gmsh.model.mesh.field.setNumber(ft, "DistMin", 0.0)
+        gmsh.model.mesh.field.setNumber(ft, "DistMax", element_size * 2.0)
+        gmsh.model.mesh.field.setAsBackgroundMesh(ft)
 
     def get_pyvista_mesh(self) -> pv.UnstructuredGrid:
         """
