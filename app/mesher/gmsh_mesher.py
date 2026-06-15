@@ -22,6 +22,7 @@ import enum
 import math
 import tempfile
 import os
+from collections import namedtuple
 from dataclasses import dataclass
 
 import numpy as np
@@ -181,6 +182,16 @@ class ExtrusionSpec:
     """
     cap_face: str
     num_layers: int = 1
+
+
+# Topology for an extrusion, resolved from the cap face on the original solid.
+#   vol        : the solid's volume tag
+#   opp        : the opposite (target) face tag
+#   d, q, m    : unit extrude direction, opposite-plane point, opposite normal
+#   corr_edge  : {cap_edge_tag: (side_face_tag, opposite_edge_tag)}
+#   corr_vert  : {cap_vertex_tag: (side_edge_tag, opposite_vertex_tag)}
+_ExtrudeTopo = namedtuple(
+    "_ExtrudeTopo", "vol opp d q m corr_edge corr_vert")
 
 
 def create_mesh(model, mesh_type_str, element_size, model_name="model",
@@ -405,146 +416,192 @@ class GmshMesher:
                         relative_sag_tolerance: float = None) -> dict:
         """Structured HEX8 by quad-meshing a cap face and extruding it.
 
-        Imports the solid, locates the user-specified cap face, isolates that
-        face as an independent copy, deletes the whole original solid, 2D-quad-
-        meshes the copy, and extrudes that mesh into ``num_layers`` uniform hex
-        layers along the inward normal (see :meth:`_build_extruded_volume`). For a
-        true prism the extruded mesh reproduces the solid; for a non-prismatic pick
-        it will not, which is the caller's responsibility (the cap face is an
-        input, not detected).
+        Locates the user-specified cap face, resolves the extrusion topology
+        (opposite face + cap↔opposite face/edge/vertex correspondence), 2D-quad-
+        meshes the cap, then builds ``num_layers`` uniform layers explicitly and
+        assigns them — fully classified — back onto the ORIGINAL solid's
+        entities (see :meth:`_build_extruded_mesh`). Keeping the original solid
+        is what lets ``collect()`` emit boundary faces/edges and F/E/V entity
+        containers keyed to the part's PersistentIDs.
 
-        The original solid is removed *recursively* (not just the volume): its
-        other faces are coincident with the extruded volume's walls, and leaving
-        them around would pollute the mesh. Copying the cap first keeps a clean
-        source that survives the recursive delete.
+        For a true prism the extruded mesh reproduces the solid; for a
+        non-prismatic pick :meth:`_extrusion_topology` raises (the cap face is an
+        input, not detected). occ.extrude is avoided because its ``numElements``
+        is only a soft hint gmsh's 3D mesher ignores (non-uniform layering).
         """
         self._import_geometry()
         cap_tag = self._surface_tag_for_pid(extrusion.cap_face)
-        d, target_q, target_m = self._extrusion_target(cap_tag)
+        topo = self._extrusion_topology(cap_tag)
 
-        # Isolate the cap, then delete the entire original solid (volume +
-        # all its faces/edges) so ONLY the cap remains to mesh and extrude.
-        cap_copy = gmsh.model.occ.copy([(2, cap_tag)])
-        gmsh.model.occ.remove(gmsh.model.getEntities(3), recursive=True)
-        gmsh.model.occ.synchronize()
-        cap = cap_copy[0][1]
-
-        # 2D quad mesh of the cap, with optional curved-edge sag refinement.
+        # Mesh the cap with quads (+ optional sag), then clear every other
+        # entity so only the cap mesh survives — classified on the ORIGINAL cap
+        # face/edges/vertices, ready to sweep onto the rest of the solid.
         gmsh.option.setNumber("Mesh.Algorithm", 11)   # quasi-structured quad
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", element_size)
         gmsh.option.setNumber("Mesh.ElementOrder", 1)
         if relative_sag_tolerance and relative_sag_tolerance > 0:
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.0)
-            self._apply_cap_sag_field(cap, element_size,
+            self._apply_cap_sag_field(cap_tag, element_size,
                                       relative_sag_tolerance)
         else:
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size)
-        gmsh.model.mesh.setRecombine(2, cap)
+        gmsh.model.mesh.setRecombine(2, cap_tag)
         gmsh.model.mesh.generate(2)
+        self._clear_non_cap_mesh(cap_tag)
 
-        # Extrude the cap mesh into uniform hex layers. occ.extrude's numElements
-        # is only a soft hint that gmsh's 3D mesher ignores (it produces
-        # non-uniform layering), so we build the layers explicitly.
-        self._build_extruded_volume(
-            cap, d, target_q, target_m, max(1, int(extrusion.num_layers)))
+        self._build_extruded_mesh(
+            cap_tag, topo, max(1, int(extrusion.num_layers)))
 
         self._assert_hex_valid(MeshType.HEX8)
         return self._collect_mesh_info(MeshType.HEX8)
 
-    def _build_extruded_volume(self, cap: int, d, target_q, target_m,
-                               n: int) -> None:
-        """Extrude the cap's 2D mesh into ``n`` uniform layers of 3D elements.
+    @staticmethod
+    def _boundary_tags(dim: int, tag: int) -> list:
+        """abs() tags of the (dim-1) boundary entities of (dim, tag)."""
+        return [abs(t) for _, t in
+                gmsh.model.getBoundary([(dim, tag)], oriented=False)]
 
-        Each cap quad becomes a column of ``n`` hexes (each cap triangle, if the
-        recombiner left any, a column of ``n`` wedges). Every cap node is
-        projected along the extrude direction ``d`` onto the opposite face's
-        plane ``(target_q, target_m)``, so the far layer lands exactly on that
-        face — and a non-parallel opposite face is handled per node (each column
-        gets its own length). Node winding is flipped when needed so every
-        element has a positive Jacobian. The result is a discrete volume.
+    def _clear_non_cap_mesh(self, cap_tag: int) -> None:
+        """Clear the mesh from every entity except the cap and its boundary.
+
+        After meshing the whole solid, keep only the cap's mesh (classified on
+        the original cap face + its edges + vertices) and empty all other
+        surfaces/curves/points, so the extruded mesh can be built onto them.
+        Clearing a face leaves its boundary curves/points untouched, so the
+        cap's shared boundary survives.
         """
-        qtags, qconn = gmsh.model.mesh.getElementsByType(3, cap)   # 4-node quad
-        ttags, tconn = gmsh.model.mesh.getElementsByType(2, cap)   # 3-node tri
-        qconn = (np.asarray(qconn, dtype=np.int64).reshape(-1, 4)
-                 if len(qtags) else np.empty((0, 4), dtype=np.int64))
-        tconn = (np.asarray(tconn, dtype=np.int64).reshape(-1, 3)
-                 if len(ttags) else np.empty((0, 3), dtype=np.int64))
-        if len(qconn) == 0 and len(tconn) == 0:
-            raise MeshValidationError(
-                "cap face produced no 2D mesh to extrude — check the cap face "
-                "and element size.")
+        cap_edges = set(self._boundary_tags(2, cap_tag))
+        # Recursive boundary so a closed edge's seam vertex (e.g. a hole circle)
+        # is kept, not cleared (it carries a cap mesh node).
+        cap_verts = set(abs(t) for dim, t in gmsh.model.getBoundary(
+            [(2, cap_tag)], oriented=False, recursive=True) if dim == 0)
+        clear = [(2, t) for _, t in gmsh.model.getEntities(2) if t != cap_tag]
+        clear += [(1, t) for _, t in gmsh.model.getEntities(1)
+                  if t not in cap_edges]
+        clear += [(0, t) for _, t in gmsh.model.getEntities(0)
+                  if t not in cap_verts]
+        gmsh.model.mesh.clear(clear)
 
-        used = np.unique(np.concatenate(
-            [qconn.ravel(), tconn.ravel()]).astype(np.int64))
-        idx = {int(t): i for i, t in enumerate(used)}
-        n_cap = len(used)
-        # PERF: this per-node fetch costs ~25 us/node (one Python<->gmsh
-        # round-trip each), measured linear. Negligible for typical caps
-        # (~100 nodes ~2.5 ms, ~1000 ~25 ms) and only perceptible past ~10k
-        # nodes (~40k ~0.65 s, ~200k ~3 s). If very fine caps ever matter,
-        # replace this loop with ONE batched call:
-        #   _, coords, _ = gmsh.model.mesh.getNodes(2, cap, includeBoundary=True)
-        # and build the tag->coord map from the returned arrays (~100x faster
-        # at scale; flat ~15-25 ms even at 200k nodes).
-        base = np.empty((n_cap, 3))
-        for tag in used:
-            coord, _, _, _ = gmsh.model.mesh.getNode(int(tag))
-            base[idx[int(tag)]] = coord
+    def _build_extruded_mesh(self, cap_tag: int, topo: "_ExtrudeTopo",
+                             n: int) -> None:
+        """Sweep the cap mesh into n layers, classified onto the solid entities.
 
-        # Project each cap node along d onto the opposite-face plane so the far
-        # layer lands exactly on that face; ``dist`` is the per-node travel and
-        # ``disp`` the per-node displacement to the opposite face.
-        d = np.asarray(d, dtype=float)
-        target_q = np.asarray(target_q, dtype=float)
-        target_m = np.asarray(target_m, dtype=float)
-        denom = float(np.dot(d, target_m))
+        For each cap node, build a column of n+1 levels projected along ``d``
+        onto the opposite-face plane (the far level lands exactly on the face).
+        Each new node is added to the right ORIGINAL entity by the cap node's
+        classification: a cap face-interior node sweeps to the volume (mid
+        levels) and the opposite face (top); a cap edge node to the side face
+        and the opposite edge; a cap vertex to the side edge and the opposite
+        vertex. Elements likewise — cap quads/tris become hex/wedge columns on
+        the volume plus a quad/tri on the opposite face; cap edge segments
+        become quad strips on the side face plus a line on the opposite edge;
+        cap vertices become line strips on the side edge. ``collect()`` then
+        emits boundary faces/edges + F/E/V containers keyed to the part's PIDs.
+        """
+        vol, opp = topo.vol, topo.opp
+        d = np.asarray(topo.d, dtype=float)
+        q = np.asarray(topo.q, dtype=float)
+        m = np.asarray(topo.m, dtype=float)
+        corr_edge, corr_vert = topo.corr_edge, topo.corr_vert
+
+        # Cap node classification (hierarchical: vertex < edge < face-interior).
+        edge_of = {int(t): e for e in corr_edge
+                   for t in gmsh.model.mesh.getNodes(1, e)[0]}
+        vert_of = {int(t): v for v in corr_vert
+                   for t in gmsh.model.mesh.getNodes(0, v)[0]}
+
+        ntags, ncoords, _ = gmsh.model.mesh.getNodes()
+        if len(ntags) == 0:
+            raise MeshValidationError("cap face produced no 2D mesh to extrude.")
+        coord = {int(t): np.asarray(ncoords[3 * i:3 * i + 3], dtype=float)
+                 for i, t in enumerate(ntags)}
+
+        denom = float(np.dot(d, m))
         if abs(denom) < 1e-9:
             raise MeshValidationError(
                 "extrude direction is parallel to the opposite face.")
-        dist = ((target_q - base) @ target_m) / denom
-        if np.any(dist <= 1e-9):
-            raise MeshValidationError(
-                "some cap nodes do not project onto the opposite face along the "
-                "extrude direction — check the cap/part geometry.")
-        disp = dist[:, None] * d[None, :]
 
-        # Positive-Jacobian orientation: test one cap face's winding vs d.
-        ref = qconn[0] if len(qconn) else tconn[0]
-        p0, p1, pl = (base[idx[int(ref[0])]], base[idx[int(ref[1])]],
-                      base[idx[int(ref[-1])]])
-        flip = float(np.dot(np.cross(p1 - p0, pl - p0), d)) < 0
+        # Columns: classify the n new nodes per cap node onto original entities.
+        next_node = gmsh.model.mesh.getMaxNodeTag() + 1
+        column = {}
+        add_nodes = {}    # (dim, ent) -> ([tags], [coord floats])
+        for tag0, p in coord.items():
+            dist = float(np.dot(q - p, m) / denom)
+            if dist <= 1e-9:
+                raise MeshValidationError(
+                    "some cap nodes do not project onto the opposite face along "
+                    "the extrude direction — check the cap/part geometry.")
+            col = [tag0]
+            for k in range(1, n + 1):
+                ntag = next_node
+                next_node += 1
+                c = p + (k / n) * dist * d
+                if tag0 in vert_of:
+                    se, ov = corr_vert[vert_of[tag0]]
+                    ent = (0, ov) if k == n else (1, se)
+                elif tag0 in edge_of:
+                    sf, oe = corr_edge[edge_of[tag0]]
+                    ent = (1, oe) if k == n else (2, sf)
+                else:
+                    ent = (2, opp) if k == n else (3, vol)
+                bucket = add_nodes.setdefault(ent, ([], []))
+                bucket[0].append(ntag)
+                bucket[1].extend(c.tolist())
+                col.append(ntag)
+            column[tag0] = col
+        for (dim, ent), (tags, cs) in add_nodes.items():
+            gmsh.model.mesh.addNodes(dim, ent, tags, cs)
 
-        # Layered node coordinates; node tag for cap node i at level k = k*N+i+1.
-        coords = np.empty(((n + 1) * n_cap, 3))
-        for k in range(n + 1):
-            coords[k * n_cap:(k + 1) * n_cap] = base + (k / n) * disp
+        # Build + classify elements.
+        next_elem = gmsh.model.mesh.getMaxElementTag() + 1
+        add_elems = {}    # (ent, etype) -> ([tags], [node tags])
 
-        gmsh.model.occ.remove([(2, cap)], recursive=True)
-        gmsh.model.occ.synchronize()
-        vol = gmsh.model.addDiscreteEntity(3)
-        node_tags = np.arange(1, (n + 1) * n_cap + 1, dtype=np.int64)
-        gmsh.model.mesh.addNodes(3, vol, node_tags, coords.ravel())
+        def emit(ent, etype, nodes):
+            nonlocal next_elem
+            bucket = add_elems.setdefault((ent, etype), ([], []))
+            bucket[0].append(next_elem)
+            next_elem += 1
+            bucket[1].extend(nodes)
 
-        def _columns(conn):
-            cols = []
-            for row in conn:
-                b = [idx[int(x)] for x in row]
+        # Cap quads -> hex columns; cap tris -> wedge columns; + opposite face.
+        for cap_etype, vol_etype in ((3, 5), (2, 6)):   # quad/hex8, tri/wedge6
+            etags, econn = gmsh.model.mesh.getElementsByType(cap_etype, cap_tag)
+            if len(etags) == 0:
+                continue
+            npe = 4 if cap_etype == 3 else 3
+            econn = np.asarray(econn, dtype=np.int64).reshape(-1, npe)
+            ref = econn[0]
+            p0, p1, pl = (coord[int(ref[0])], coord[int(ref[1])],
+                          coord[int(ref[-1])])
+            flip = float(np.dot(np.cross(p1 - p0, pl - p0), d)) < 0
+            for row in econn:
+                b = [int(x) for x in row]
                 if flip:
                     b = b[::-1]
                 for k in range(n):
-                    cols.append([k * n_cap + i + 1 for i in b]
-                                + [(k + 1) * n_cap + i + 1 for i in b])
-            return cols
+                    emit(vol, vol_etype, [column[t][k] for t in b]
+                         + [column[t][k + 1] for t in b])
+                emit(opp, cap_etype, [column[t][n] for t in b])
 
-        next_tag = 1
-        for conn, etype in ((qconn, 5), (tconn, 6)):   # hex8 / wedge6
-            cols = _columns(conn)
-            if not cols:
+        # Cap edge segments -> side-face quad strips + opposite-edge lines.
+        for e, (sf, oe) in corr_edge.items():
+            stags, sconn = gmsh.model.mesh.getElementsByType(1, e)
+            if len(stags) == 0:
                 continue
-            flat = np.asarray(cols, dtype=np.int64).ravel()
-            etags = np.arange(next_tag, next_tag + len(cols), dtype=np.int64)
-            next_tag += len(cols)
-            gmsh.model.mesh.addElementsByType(vol, etype, etags, flat)
+            for seg in np.asarray(sconn, dtype=np.int64).reshape(-1, 2):
+                a, b = int(seg[0]), int(seg[1])
+                for k in range(n):
+                    emit(sf, 3, [column[a][k], column[b][k],
+                                 column[b][k + 1], column[a][k + 1]])
+                emit(oe, 1, [column[a][n], column[b][n]])
+
+        # Cap vertices -> side-edge line strips.
+        for v, (se, _ov) in corr_vert.items():
+            for k in range(n):
+                emit(se, 1, [column[v][k], column[v][k + 1]])
+
+        for (ent, etype), (tags, conn) in add_elems.items():
+            gmsh.model.mesh.addElementsByType(ent, etype, tags, conn)
 
     def _surface_tag_for_pid(self, pid: str) -> int:
         """Map a CADModelData face PersistentID ('F{n}') to its gmsh tag (n+1)."""
@@ -564,28 +621,24 @@ class GmshMesher:
         pmin, pmax = gmsh.model.getParametrizationBounds(2, tag)
         return [(pmin[0] + pmax[0]) / 2.0, (pmin[1] + pmax[1]) / 2.0]
 
-    def _extrusion_target(self, cap_tag: int):
-        """Find the extrude direction and the opposite face's plane.
+    def _extrusion_topology(self, cap_tag: int) -> "_ExtrudeTopo":
+        """Resolve the extrusion topology from the cap face (on the solid).
 
-        Returns ``(d, Q, m)``: the unit extrude direction ``d`` (cap normal
-        pointing INTO the solid), and the opposite (target) face as a plane
-        point ``Q`` and unit normal ``m``. The target is the planar face — other
-        than the cap — whose plane is perpendicular to ``d`` (normal parallel to
-        ``d``) and that lies farthest along ``d``. Cap nodes are later projected
-        onto this plane along ``d`` so the far layer lands exactly on the face
-        (see :meth:`_build_extruded_volume`).
+        Returns an ``_ExtrudeTopo``: the volume, the opposite (target) face,
+        the unit extrude direction ``d`` (cap normal INTO the solid), the
+        opposite-face plane ``(q, m)``, and the cap↔opposite correspondence —
+        ``corr_edge`` (cap edge → side face + opposite edge) and ``corr_vert``
+        (cap vertex → side edge + opposite vertex). The extruded mesh is
+        assigned back onto these entities so ``collect()`` emits boundary
+        faces/edges + F/E/V containers keyed to the part's PIDs.
 
         Auto-detected, not user-supplied: the cap plus "extrude through the
-        thickness" already determines the opposite face. Raises
-        MeshValidationError when there is no opposite planar face, or it isn't
-        congruent with the cap (the cap/part isn't a clean extrusion pair).
+        thickness" already determines the rest. Raises MeshValidationError for a
+        non-planar cap, no parallel opposite face, an incongruent pair, or a
+        boundary that doesn't correspond (i.e. a non-prismatic part).
 
-        NOTE: Slanted opposite faces are NOT currently supported — the opposite
-        face must be parallel to the cap (normal ∥ d), so equal-area congruence
-        is valid. Supporting a slanted opposite face (detect by "faces away
-        along d" + projected-area congruence + per-node travel) is deferred to
-        the entity-container phase, together with associating boundary nodes to
-        the opposite face's edges/vertices.
+        NOTE: parallel opposite faces only (normal ∥ d), so equal-area
+        congruence is valid. Slanted opposite faces are not yet supported.
         """
         cap_type = gmsh.model.getType(2, cap_tag)
         if cap_type != "Plane":
@@ -600,8 +653,7 @@ class GmshMesher:
 
         vol, vol_faces = None, []
         for _, vt in gmsh.model.getEntities(3):
-            faces = [abs(t) for _, t in
-                     gmsh.model.getBoundary([(3, vt)], oriented=False)]
+            faces = self._boundary_tags(3, vt)
             if cap_tag in faces:
                 vol, vol_faces = vt, faces
                 break
@@ -611,9 +663,8 @@ class GmshMesher:
         into = np.asarray(gmsh.model.occ.getCenterOfMass(3, vol)) - cap_com
         d = n_cap if float(np.dot(into, n_cap)) > 0 else -n_cap
 
-        # Opposite face: planar, plane perpendicular to d (normal ∥ d), farthest
-        # along d. Side walls have normals ⊥ d and are skipped.
-        target, best_reach = None, None
+        # Opposite face: planar, normal ∥ d, farthest along d (side walls ⊥ d).
+        opp, best_reach = None, None
         for ft in vol_faces:
             if ft == cap_tag or gmsh.model.getType(2, ft) != "Plane":
                 continue
@@ -628,8 +679,8 @@ class GmshMesher:
             reach = float(np.dot(
                 np.asarray(gmsh.model.occ.getCenterOfMass(2, ft)), d))
             if best_reach is None or reach > best_reach:
-                best_reach, target = reach, ft
-        if target is None:
+                best_reach, opp = reach, ft
+        if opp is None:
             raise MeshValidationError(
                 "no opposite planar face found for the cap — extruded hex needs "
                 "a planar cap with a parallel opposite face (is the part "
@@ -639,18 +690,51 @@ class GmshMesher:
         # extrusion has cap and opposite face of equal area. (A slanted face
         # would need projected area instead — deferred; see method note.)
         cap_area = gmsh.model.occ.getMass(2, cap_tag)
-        tgt_area = gmsh.model.occ.getMass(2, target)
-        if abs(cap_area - tgt_area) > 1e-3 * max(cap_area, 1e-12):
+        opp_area = gmsh.model.occ.getMass(2, opp)
+        if abs(cap_area - opp_area) > 1e-3 * max(cap_area, 1e-12):
             raise MeshValidationError(
-                f"cap ({cap_area:.4g}) and opposite face ({tgt_area:.4g}) areas "
+                f"cap ({cap_area:.4g}) and opposite face ({opp_area:.4g}) areas "
                 f"differ — not a clean extrusion pair (non-prismatic?).")
 
-        q = np.asarray(gmsh.model.occ.getCenterOfMass(2, target))
+        q = np.asarray(gmsh.model.occ.getCenterOfMass(2, opp))
         m = np.asarray(
-            gmsh.model.getNormal(target, self._face_param_mid(target))[:3],
-            dtype=float)
+            gmsh.model.getNormal(opp, self._face_param_mid(opp))[:3], dtype=float)
         m /= np.linalg.norm(m)
-        return d, q, m
+
+        # cap↔opposite correspondence from the solid's boundary topology.
+        opp_edges = set(self._boundary_tags(2, opp))
+        corr_edge = {}
+        for e in self._boundary_tags(2, cap_tag):
+            sides = [f for f in gmsh.model.getAdjacencies(1, e)[0]
+                     if f != cap_tag]
+            oes = ([x for x in self._boundary_tags(2, sides[0])
+                    if x in opp_edges] if sides else [])
+            if not sides or not oes:
+                raise MeshValidationError(
+                    "a cap edge has no matching side face / opposite edge — the "
+                    "part is not a clean extrusion (non-prismatic?).")
+            corr_edge[e] = (sides[0], oes[0])
+
+        # Cap vertices from the face's RECURSIVE boundary, not the edges' — a
+        # closed edge (e.g. a hole circle) has a seam vertex that getBoundary of
+        # the edge omits; missing it would misclassify that node onto the face.
+        cap_eset = set(corr_edge)
+        cap_verts = set(abs(t) for dim, t in gmsh.model.getBoundary(
+            [(2, cap_tag)], oriented=False, recursive=True) if dim == 0)
+        corr_vert = {}
+        for v in cap_verts:
+            sides = [c for c in gmsh.model.getAdjacencies(0, v)[0]
+                     if c not in cap_eset]
+            ovs = ([x for x in self._boundary_tags(1, sides[0])
+                    if x != v] if sides else [])
+            if not sides or not ovs:
+                raise MeshValidationError(
+                    "a cap vertex has no matching side edge / opposite vertex — "
+                    "the part is not a clean extrusion (non-prismatic?).")
+            corr_vert[v] = (sides[0], ovs[0])
+
+        return _ExtrudeTopo(vol=vol, opp=opp, d=d, q=q, m=m,
+                            corr_edge=corr_edge, corr_vert=corr_vert)
 
     def _apply_cap_sag_field(self, cap_tag: int, element_size: float,
                              sag: float) -> None:
