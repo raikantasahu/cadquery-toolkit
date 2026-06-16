@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+from gi.repository import Gdk, Gtk
 
 
 def edit_face_selection(
@@ -54,11 +54,49 @@ def edit_face_selection(
     label_renderer = Gtk.CellRendererText()
     label_renderer.set_property("editable", True)
 
+    # Track an in-progress cell edit. Clicking OK steals focus from the cell
+    # entry, which makes GTK emit "editing-canceled" (not "edited"), so the
+    # typed text would be lost. Capture it live via the entry's "changed"
+    # signal and keep it across a focus-out cancel; only a real Escape (tracked
+    # below) discards it. The OK handler then commits whatever was captured.
+    active_edit: dict = {}
+
+    def _on_editable_key(_editable, event):
+        if event.keyval == Gdk.KEY_Escape:
+            active_edit["escaped"] = True
+        return False
+
+    def _on_editing_started(_renderer, editable, path):
+        active_edit.clear()
+        active_edit["path"] = path
+        active_edit["text"] = editable.get_text()
+        editable.connect(
+            "changed", lambda e: active_edit.__setitem__("text", e.get_text()))
+        editable.connect("key-press-event", _on_editable_key)
+
+    def _commit_active():
+        # Write the captured in-progress text into the store and stop tracking.
+        if "path" in active_edit and "text" in active_edit:
+            store[active_edit["path"]][1] = active_edit["text"].strip()
+        active_edit.clear()
+
     def _on_label_edited(_renderer, path, new_text):
         # Strip but allow empty rows; we drop empties on OK.
         store[path][1] = new_text.strip()
+        active_edit.clear()
 
+    def _on_editing_canceled(_renderer):
+        # Honor a real Escape; otherwise (OK click steals focus) commit the
+        # text now, synchronously, so the cell repaint after the cancel reads
+        # the new value from the store instead of briefly flashing the old one.
+        if active_edit.get("escaped"):
+            active_edit.clear()
+        else:
+            _commit_active()
+
+    label_renderer.connect("editing-started", _on_editing_started)
     label_renderer.connect("edited", _on_label_edited)
+    label_renderer.connect("editing-canceled", _on_editing_canceled)
     label_col = Gtk.TreeViewColumn("Owner label", label_renderer, text=1)
     label_col.set_expand(True)
     tree.append_column(label_col)
@@ -100,6 +138,9 @@ def edit_face_selection(
     dialog.show_all()
 
     response = dialog.run()
+    # Safety net: commit any capture that "editing-canceled"/"edited" didn't
+    # already flush before run() returned. Normally a no-op.
+    _commit_active()
     edited: List[Tuple[str, str]] = []
     if response == Gtk.ResponseType.OK:
         for row in store:
