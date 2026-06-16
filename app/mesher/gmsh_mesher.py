@@ -564,6 +564,11 @@ class GmshMesher:
             bucket[1].extend(nodes)
 
         # Cap quads -> hex columns; cap tris -> wedge columns; + opposite face.
+        # Record each cap cell's nodes by boundary edge so the side-face strips
+        # below can be wound outward: a cell centroid is a point just inside the
+        # solid, taken locally per edge so holes / non-convex caps still orient
+        # correctly (a single global centroid would mis-orient hole walls).
+        cap_cell_of_edge = {}
         for cap_etype, vol_etype in ((3, 5), (2, 6)):   # quad/hex8, tri/wedge6
             etags, econn = gmsh.model.mesh.getElementsByType(cap_etype, cap_tag)
             if len(etags) == 0:
@@ -578,18 +583,30 @@ class GmshMesher:
                 b = [int(x) for x in row]
                 if flip:
                     b = b[::-1]
+                for i in range(npe):
+                    cap_cell_of_edge[frozenset((b[i], b[(i + 1) % npe]))] = b
                 for k in range(n):
                     emit(vol, vol_etype, [column[t][k] for t in b]
                          + [column[t][k + 1] for t in b])
                 emit(opp, cap_etype, [column[t][n] for t in b])
 
         # Cap edge segments -> side-face quad strips + opposite-edge lines.
+        # gmsh gives each cap edge an arbitrary segment direction, so wind every
+        # side quad explicitly: its normal (edge x extrude-dir) must point away
+        # from the adjacent cap cell's centroid, i.e. outward from the solid.
         for e, (sf, oe) in corr_edge.items():
             stags, sconn = gmsh.model.mesh.getElementsByType(1, e)
             if len(stags) == 0:
                 continue
             for seg in np.asarray(sconn, dtype=np.int64).reshape(-1, 2):
                 a, b = int(seg[0]), int(seg[1])
+                cell = cap_cell_of_edge.get(frozenset((a, b)))
+                if cell is not None:
+                    outward = (0.5 * (coord[a] + coord[b])
+                               - np.mean([coord[t] for t in cell], axis=0))
+                    if float(np.dot(np.cross(coord[b] - coord[a], d),
+                                    outward)) < 0:
+                        a, b = b, a
                 for k in range(n):
                     emit(sf, 3, [column[a][k], column[b][k],
                                  column[b][k + 1], column[a][k + 1]])
