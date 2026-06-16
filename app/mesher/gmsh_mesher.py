@@ -24,6 +24,7 @@ import tempfile
 import os
 from collections import namedtuple
 from dataclasses import dataclass
+from typing import List, Optional
 
 import numpy as np
 import pyvista as pv
@@ -184,6 +185,37 @@ class ExtrusionSpec:
     num_layers: int = 1
 
 
+@dataclass
+class RefinementSpec:
+    """Local mesh refinement around a picked vertex, for the tet/recombine path.
+
+    The element size ramps from ``fine_size`` at the vertex up to the global
+    ``element_size`` by ``radius`` away (a gmsh Distance+Threshold field). The
+    UI anchor is always a single vertex; ``scope`` decides which parts it acts
+    on:
+
+        scope="local"   : refine ONLY the part (volume) that owns the vertex.
+                          The field is wrapped in a gmsh Restrict field bound to
+                          that volume, so other parts keep the global size.
+        scope="contact" : refine EVERY part in the vicinity of the vertex. The
+                          vertex location is shared by one vertex per touching
+                          body (e.g. a contact point); the field is anchored on
+                          all model points coincident with the picked one and is
+                          applied globally, so each touching part is refined.
+
+    Fields:
+        vertex:    vertex PersistentID ("V{n}", gmsh point tag ``n + 1``).
+        fine_size: element size at the vertex (Threshold SizeMin).
+        radius:    distance over which size relaxes back to ``element_size``
+                   (Threshold DistMax / SizeMax).
+        scope:     "local" or "contact".
+    """
+    vertex: str
+    fine_size: float
+    radius: float
+    scope: str = "contact"
+
+
 # Topology for an extrusion, resolved from the cap face on the original solid.
 #   vol        : the solid's volume tag
 #   opp        : the opposite (target) face tag
@@ -195,7 +227,7 @@ _ExtrudeTopo = namedtuple(
 
 
 def create_mesh(model, mesh_type_str, element_size, model_name="model",
-                relative_sag_tolerance=None, extrusion=None):
+                relative_sag_tolerance=None, extrusion=None, refinements=None):
     """Generate a volumetric mesh and return the mesher with statistics.
 
     Args:
@@ -216,7 +248,7 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model",
     mesher = GmshMesher(model, model_name=model_name)
     stats = mesher.generate(mesh_type, element_size,
                             relative_sag_tolerance=relative_sag_tolerance,
-                            extrusion=extrusion)
+                            extrusion=extrusion, refinements=refinements)
     return mesher, stats
 
 
@@ -368,7 +400,8 @@ class GmshMesher:
     def generate(self, mesh_type: MeshType = MeshType.TET4,
                  element_size: float = 5.0,
                  relative_sag_tolerance: float = None,
-                 extrusion: "ExtrusionSpec" = None) -> dict:
+                 extrusion: "ExtrusionSpec" = None,
+                 refinements: Optional[List["RefinementSpec"]] = None) -> dict:
         """
         Generate a volumetric mesh.
 
@@ -385,6 +418,11 @@ class GmshMesher:
                 it through the thickness (``mesh_type`` is ignored — the result
                 is HEX8). ``element_size`` sets the in-plane quad size and
                 ``relative_sag_tolerance`` the curved cap-edge fidelity.
+            refinements: Optional list of ``RefinementSpec`` for local/contact
+                refinement around picked vertices (tet and recombined-hex paths
+                only; mutually exclusive with ``extrusion``). Each adds a
+                Distance+Threshold size field; together they combine — with
+                gmsh's own curvature sizing — via a single background Min field.
 
         Returns:
             Dictionary with mesh statistics: node_count, element_count,
@@ -400,11 +438,17 @@ class GmshMesher:
                 raise MeshValidationError(
                     f"extrusion produces hex8 — set mesh_type=hex8 (got "
                     f"'{mesh_type.value}').")
+            if refinements:
+                raise MeshValidationError(
+                    "local/contact refinement is not supported with extruded "
+                    "hex; use a tet or recombined-hex mesh type.")
             return self._generate_extruded(
                 extrusion, element_size, relative_sag_tolerance)
 
         self._import_geometry()
-        self._configure_mesh(mesh_type, element_size, relative_sag_tolerance)
+        self._configure_mesh(mesh_type, element_size, relative_sag_tolerance,
+                             refinements)
+        self._apply_refinement_fields(refinements, element_size)
 
         gmsh.model.mesh.generate(3)
         self._assert_hex_valid(mesh_type)
@@ -899,7 +943,9 @@ class GmshMesher:
 
     def _configure_mesh(self, mesh_type: MeshType,
                         element_size: float,
-                        relative_sag_tolerance: float = None) -> None:
+                        relative_sag_tolerance: float = None,
+                        refinements: Optional[List["RefinementSpec"]] = None
+                        ) -> None:
         """Configure Gmsh meshing options based on mesh type and element size."""
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", element_size)
 
@@ -908,6 +954,10 @@ class GmshMesher:
             gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", n)
             # Relax the minimum-size clamp so tight curves can refine below
             # element_size * 0.5. Gmsh treats 0 as "no lower bound".
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.0)
+        elif refinements:
+            # Refinement fields prescribe sizes well below element_size; relax
+            # the lower clamp (0 = no bound) so they are not clamped back up.
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.0)
         else:
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", element_size * 0.5)
@@ -949,6 +999,111 @@ class GmshMesher:
             gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)
             gmsh.option.setNumber("Mesh.ElementOrder", 2)
             gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
+
+    def _apply_refinement_fields(
+            self, refinements: Optional[List["RefinementSpec"]],
+            element_size: float) -> None:
+        """Build local/contact refinement size fields and set them as the mesh
+        size background (combined via a single Min field).
+
+        Each spec becomes a Distance+Threshold field, optionally wrapped in a
+        Restrict field (local scope). A final Min field combines them; gmsh
+        further takes the min with its own curvature/boundary sizing, so this
+        coexists with ``relativeSagTolerance``. No-op when there are no specs.
+        """
+        if not refinements:
+            return
+        field_tags = [self._build_refinement_field(spec, element_size)
+                      for spec in refinements]
+        fmin = gmsh.model.mesh.field.add("Min")
+        gmsh.model.mesh.field.setNumbers(fmin, "FieldsList", field_tags)
+        gmsh.model.mesh.field.setAsBackgroundMesh(fmin)
+
+    def _build_refinement_field(self, spec: "RefinementSpec",
+                                element_size: float) -> int:
+        """Build one refinement field from a ``RefinementSpec``; return its tag.
+
+        Distance (from the anchor point set) -> Threshold (graded size), and for
+        ``scope="local"`` a Restrict that confines it to the vertex's volume.
+        """
+        ptag = self._point_tag_for_pid(spec.vertex)
+        if spec.scope == "local":
+            points = [ptag]
+        elif spec.scope == "contact":
+            # Anchor on every model point coincident with the picked vertex —
+            # one per body meeting at the contact — so all touching parts refine.
+            points = self._coincident_points(ptag)
+        else:
+            raise MeshValidationError(
+                f"refinement scope must be 'local' or 'contact', "
+                f"got {spec.scope!r}.")
+        if spec.fine_size <= 0 or spec.radius <= 0:
+            raise MeshValidationError(
+                "refinement fine_size and radius must be positive.")
+
+        fd = gmsh.model.mesh.field.add("Distance")
+        gmsh.model.mesh.field.setNumbers(fd, "PointsList", points)
+        ft = gmsh.model.mesh.field.add("Threshold")
+        gmsh.model.mesh.field.setNumber(ft, "InField", fd)
+        gmsh.model.mesh.field.setNumber(ft, "SizeMin", spec.fine_size)
+        gmsh.model.mesh.field.setNumber(ft, "SizeMax", element_size)
+        gmsh.model.mesh.field.setNumber(ft, "DistMin", 0.0)
+        gmsh.model.mesh.field.setNumber(ft, "DistMax", spec.radius)
+        if spec.scope != "local":
+            return ft
+
+        vol = self._volume_of_point(ptag)
+        if vol is None:
+            raise MeshValidationError(
+                f"local refinement vertex {spec.vertex!r} is not on any part "
+                f"(volume).")
+        fr = gmsh.model.mesh.field.add("Restrict")
+        gmsh.model.mesh.field.setNumber(fr, "InField", ft)
+        gmsh.model.mesh.field.setNumbers(fr, "VolumesList", [vol])
+        return fr
+
+    def _point_tag_for_pid(self, pid: str) -> int:
+        """Map a vertex PersistentID ('V{n}') to its gmsh point tag (n+1)."""
+        if not (isinstance(pid, str) and pid[:1].upper() == "V"
+                and pid[1:].isdigit()):
+            raise MeshValidationError(
+                f"refinement vertex must be a vertex PersistentID like 'V7', "
+                f"got {pid!r}.")
+        tag = int(pid[1:]) + 1
+        if (0, tag) not in gmsh.model.getEntities(0):
+            raise MeshValidationError(
+                f"refinement vertex {pid!r} (point tag {tag}) not found in "
+                f"geometry.")
+        return tag
+
+    @staticmethod
+    def _coincident_points(ptag: int) -> List[int]:
+        """All model point tags coincident (within tolerance) with ``ptag``.
+
+        In an assembly each touching body has its own vertex at a shared
+        location; this returns the whole coincident set so a contact field can
+        refine every part there from a single picked vertex.
+        """
+        target = gmsh.model.getValue(0, ptag, [])
+        bb = gmsh.model.getBoundingBox(-1, -1)
+        diag = math.sqrt(sum((bb[i + 3] - bb[i]) ** 2 for i in range(3)))
+        tol = max(1e-9, diag * 1e-6)
+        out = []
+        for _, t in gmsh.model.getEntities(0):
+            c = gmsh.model.getValue(0, t, [])
+            if math.sqrt(sum((c[i] - target[i]) ** 2 for i in range(3))) <= tol:
+                out.append(t)
+        return out
+
+    @staticmethod
+    def _volume_of_point(ptag: int) -> Optional[int]:
+        """The volume tag whose boundary contains point ``ptag`` (else None)."""
+        for _, vol in gmsh.model.getEntities(3):
+            pts = {abs(t) for d, t in gmsh.model.getBoundary(
+                [(3, vol)], oriented=False, recursive=True) if d == 0}
+            if ptag in pts:
+                return vol
+        return None
 
     # All hex types share the recombine-from-tet-subdivision path and the
     # same curvature-under-resolution failure mode (verified for HEX8/20/27).

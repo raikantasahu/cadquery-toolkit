@@ -16,6 +16,15 @@ Example config (mesh_config.yaml):
       elementType: tet4             # tet4, tet10, hex8, hex20, hex27
       elementSize: 5.0
       relativeSagTolerance: 0.01    # optional; max sag/radius on curved faces
+      # Optional local refinement around picked vertices (tet/recombined-hex).
+      localRefinement:              # refine only the vertex's own part
+        vertex: V7
+        fineSize: 0.1
+        radius: 2.0
+      contactRefinement:            # refine all parts meeting at the vertex
+        vertex: V12
+        fineSize: 0.05
+        radius: 1.0
 
     output:
       format: xml             # xml, json (MeshData formats), or msh
@@ -28,7 +37,7 @@ import yaml
 
 from importer import step_importer
 from mesher.gmsh_mesher import (
-    GmshMesher, MeshType, MeshValidationError, ExtrusionSpec,
+    GmshMesher, MeshType, MeshValidationError, ExtrusionSpec, RefinementSpec,
 )
 
 _MESH_TYPES = {
@@ -44,6 +53,40 @@ _FORMAT_EXTENSIONS = {
     "json": ".json",
     "msh": ".msh",
 }
+
+
+def _parse_refinements(mesh_cfg, parser):
+    """Build RefinementSpec list from mesh.localRefinement / contactRefinement.
+
+    Each key may hold one entry (a dict) or several (a list of dicts). Every
+    entry needs ``vertex`` (e.g. V7) plus positive ``fineSize`` and ``radius``.
+    """
+    specs = []
+    for key, scope in (("localRefinement", "local"),
+                       ("contactRefinement", "contact")):
+        cfg = mesh_cfg.get(key)
+        if not cfg:
+            continue
+        entries = cfg if isinstance(cfg, list) else [cfg]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                parser.error(f"mesh.{key} must be a mapping (or list of them)")
+            vertex = entry.get("vertex")
+            if not vertex:
+                parser.error(f"mesh.{key} requires 'vertex' (e.g. V7)")
+            try:
+                fine_size = float(entry["fineSize"])
+                radius = float(entry["radius"])
+            except (KeyError, TypeError, ValueError):
+                parser.error(
+                    f"mesh.{key} requires numeric 'fineSize' and 'radius'")
+            if fine_size <= 0 or radius <= 0:
+                parser.error(
+                    f"mesh.{key}: 'fineSize' and 'radius' must be positive")
+            specs.append(RefinementSpec(
+                vertex=str(vertex), fine_size=fine_size, radius=radius,
+                scope=scope))
+    return specs
 
 
 def main():
@@ -120,6 +163,13 @@ def main():
             parser.error(f"numLayers must be >= 1 (got {num_layers})")
         extrusion = ExtrusionSpec(cap_face=str(cap_face), num_layers=num_layers)
 
+    # Local/contact refinement (tet & recombined-hex paths only).
+    refinements = _parse_refinements(mesh_cfg, parser)
+    if refinements and extrusion is not None:
+        parser.error(
+            "mesh.localRefinement/contactRefinement cannot be combined with "
+            "mesh.extrusion (extruded hex)")
+
     output_format = output_cfg.get("format", "msh")
     if output_format not in _FORMAT_EXTENSIONS:
         parser.error(
@@ -146,6 +196,7 @@ def main():
             element_size=element_size,
             relative_sag_tolerance=relative_sag_tolerance,
             extrusion=extrusion,
+            refinements=refinements,
         )
     except MeshValidationError as e:
         mesher.finalize()
