@@ -306,11 +306,14 @@ def collect(mesh_id: int = 1, owner: str = "model",
         owner_str = entity_owners.get(pid)
         if owner_str is None:
             continue
-        curve_node_tags, _, _ = gmsh.model.mesh.getNodes(1, curve_tag)
+        # includeBoundary so the curve's endpoint-vertex nodes are included,
+        # not just its interior nodes (gmsh defaults includeBoundary=False).
+        curve_node_tags, _, _ = gmsh.model.mesh.getNodes(
+            1, curve_tag, includeBoundary=True)
         containers.append(EntityContainer(
             owner=owner_str,
             container_key=_parse_container_key(owner_str),
-            node_ids=sorted(int(n) for n in curve_node_tags),
+            node_ids=sorted({int(n) for n in curve_node_tags}),
             edge_ids=edges_per_curve.get(curve_tag, []),
         ))
 
@@ -320,7 +323,10 @@ def collect(mesh_id: int = 1, owner: str = "model",
         owner_str = entity_owners.get(pid)
         if owner_str is None:
             continue
-        surf_node_tags, _, _ = gmsh.model.mesh.getNodes(2, surf_tag)
+        # includeBoundary so the face's bounding edge/vertex nodes are included,
+        # not just its interior nodes (gmsh defaults includeBoundary=False).
+        surf_node_tags, _, _ = gmsh.model.mesh.getNodes(
+            2, surf_tag, includeBoundary=True)
         bounding = gmsh.model.getBoundary([(2, surf_tag)], oriented=False)
         surf_edge_ids = []
         for _, btag in bounding:
@@ -330,7 +336,7 @@ def collect(mesh_id: int = 1, owner: str = "model",
         containers.append(EntityContainer(
             owner=owner_str,
             container_key=_parse_container_key(owner_str),
-            node_ids=sorted(int(n) for n in surf_node_tags),
+            node_ids=sorted({int(n) for n in surf_node_tags}),
             edge_ids=surf_edge_ids,
             face_ids=faces_per_surface.get(surf_tag, []),
         ))
