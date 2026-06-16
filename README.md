@@ -33,6 +33,11 @@ two sides interoperate.
   `hex20`/`hex27`), optional curvature-driven refinement via `relativeSagTolerance`
   (max sag/radius on curved faces), and export to the `MeshData` wire format
   (XML or JSON), legacy mesh JSON, or native Gmsh `.msh`.
+- **Structured extruded hex8.** For prismatic parts, name a planar cap face and
+  the mesher quad-meshes it and sweeps that mesh through the part thickness in
+  `numLayers` explicit layers, yielding a clean all-hex mesh with boundary
+  edges/faces and entity containers classified onto the original solid. Hex
+  meshes are validated and rejected if any element is inverted.
 - **MeshData export.** Volumetric meshes serialize to a versioned `MeshData`
   envelope (one `MeshFragment` per Part, boundary edges/faces, and entity
   containers) consumed by the sibling C# `RSA.Mesh` application.
@@ -77,7 +82,9 @@ cd app
 python cad_app.py
 ```
 
-Pick a model from the dropdown (e.g. `box`, `hex_bolt`, `bracket`), set its
+Pick a model from the dropdown (e.g. `box`, `hex_bolt`, `bracket`, or
+`thick_tube` — a hollow tube that can be restricted to an angular sector via
+`sweep_angle_deg` for modeling a quarter under symmetric loads), set its
 parameters, and use **Model → View** to render it or **Model → Export** to
 write a STEP or `CADModelData` JSON file.
 
@@ -141,6 +148,18 @@ output:
   format: xml                   # xml, json (MeshData formats), or msh
 ```
 
+For a prismatic part, add a `mesh.extrusion` block to build a structured
+all-hex mesh swept from a cap face (requires `elementType: hex8`):
+
+```yaml
+mesh:
+  elementType: hex8
+  elementSize: 5.0
+  extrusion:
+    capFace: F4                 # PersistentID of the planar cap face to sweep
+    numLayers: 8                # hex layers through the thickness
+```
+
 ### Visualize a model or mesh
 
 ```bash
@@ -175,10 +194,17 @@ The PyVista viewer used by **Model → View** and `visualize.py`.
 
 **Mesh → Create Mesh** generates a volumetric mesh via Gmsh and displays it
 in the same viewer; statistics are available from **Mesh → Show Stats**.
-
+#### Mesh Settings
 ![Mesh settings dialog](docs/screenshots/Create-Mesh-Settings.png)
+#### Mesh Settings with Extrusion
+![Mesh settings with extrusion dialog](docs/screenshots/Create-Mesh-Settings-Extrusion.png)
+#### Mesh of Parametric Gear
 ![Volumetric mesh of a parametric gear](docs/screenshots/Mesh-Parametric-Gear.png)
+#### Mesh of Cylinder with Holes
 ![Volumetric mesh of a cylinder-with-holes](docs/screenshots/Mesh-cylinder-with-holes.png)
+#### Extruded Mesh of Thick Tube
+![Extruded mesh of a thick tube](docs/screenshots/Extruded-Mesh-Thick-Tube.png)
+#### Mesh Statistics
 ![Mesh statistics dialog](docs/screenshots/Mesh-Statistics.png)
 
 ## Project layout
