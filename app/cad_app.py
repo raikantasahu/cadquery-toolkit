@@ -65,10 +65,10 @@ class CadQueryApp(Gtk.Window):
         self._picked_vertices: list = []
         # Single cap face (persistent_id, label) for extruded hex, or None.
         self._cap_face: tuple = None
-        # Single anchor vertex (persistent_id, label) for local / contact mesh
-        # refinement, or None.
-        self._refine_local: tuple = None
-        self._refine_contact: tuple = None
+        # Refinement regions: list of dicts
+        # {scope, vertex_pid, vertex_label, fine_size, radius}. Each anchors on
+        # a picked vertex; resolved to (coordinate, part index) at mesh time.
+        self._refinements: list = []
         # Last-used Mesh Settings, persisted across dialog invocations for the
         # same model; reset to None (dialog defaults) when the model changes.
         self._mesh_settings: dict = None
@@ -249,8 +249,7 @@ class CadQueryApp(Gtk.Window):
         self._picked_faces = []
         self._picked_vertices = []
         self._cap_face = None
-        self._refine_local = None
-        self._refine_contact = None
+        self._refinements = []
         self._mesh_settings = None
         builder = notebook.get_nth_page(page_num)
         self._sync_menu_sensitivity(builder=builder)
@@ -607,16 +606,14 @@ class CadQueryApp(Gtk.Window):
         state = self._mesh_settings
         while True:
             cap_pid = self._cap_face[0] if self._cap_face else None
-            local_pid = self._refine_local[0] if self._refine_local else None
-            contact_pid = (self._refine_contact[0]
-                           if self._refine_contact else None)
             mesh_config = ask_mesh_settings(
                 self, cap_face_pid=cap_pid,
-                local_vertex_pid=local_pid, contact_vertex_pid=contact_pid,
-                initial=state)
+                refinements=self._refinements, initial=state)
             if mesh_config is None:
                 self.status_label.set_text("Mesh creation cancelled")
                 return
+            # Capture inline edits to the region table before any round-trip.
+            self._refinements = mesh_config.get('_all_refinements', [])
             action = mesh_config.get('_action')
             if action == 'pick_cap':
                 picked = self._pick_single_cap_face()
@@ -624,16 +621,15 @@ class CadQueryApp(Gtk.Window):
                     self._cap_face = picked
                 state = mesh_config
                 continue
-            if action == 'pick_local_vertex':
-                picked = self._pick_single_vertex(self._refine_local)
+            if action in ('add_local', 'add_contact'):
+                scope = 'local' if action == 'add_local' else 'contact'
+                picked = self._pick_single_vertex(None)
                 if picked is not None:
-                    self._refine_local = picked
-                state = mesh_config
-                continue
-            if action == 'pick_contact_vertex':
-                picked = self._pick_single_vertex(self._refine_contact)
-                if picked is not None:
-                    self._refine_contact = picked
+                    self._refinements.append({
+                        'scope': scope, 'vertex_pid': picked[0],
+                        'vertex_label': picked[1],
+                        'fine_size': 0.5, 'radius': 2.0,
+                    })
                 state = mesh_config
                 continue
             break
@@ -656,40 +652,29 @@ class CadQueryApp(Gtk.Window):
             extrusion = ExtrusionSpec(
                 cap_face=ex['cap_face'], num_layers=ex['num_layers'])
 
-        # Build local/contact refinement specs from the picked anchor vertices.
-        # Anchored by the vertex's world COORDINATE (and 0-based part index for
-        # local scope): picker vertex ids do not match gmsh's import ordering on
-        # assemblies, but coordinates and part order do. See _resolve_vertex_anchor.
+        # Build refinement specs from the region table. Each region anchors on a
+        # picked vertex resolved to its world COORDINATE (and 0-based part index
+        # for local scope): picker vertex ids do not match gmsh's import ordering
+        # on assemblies, but coordinates and part order do. See
+        # _resolve_vertex_anchor. mesh_config['refinements'] is empty while
+        # extruding (mutually exclusive).
         refinements = []
-        if mesh_config.get('local_refine_enabled'):
-            anchor = self._resolve_vertex_anchor(self._refine_local)
+        for region in mesh_config.get('refinements', []):
+            anchor = self._resolve_vertex_anchor(
+                (region['vertex_pid'], region.get('vertex_label', '')))
             if anchor is None:
                 self._show_error(
                     "Mesh Error",
-                    "Local refinement needs a vertex.\n"
-                    "Click \"Pick…\" in the mesh dialog to choose one."
+                    f"Refinement vertex {region['vertex_pid']} could not be "
+                    "resolved on the current model."
                 )
-                self.status_label.set_text("Error: no vertex for refinement")
+                self.status_label.set_text("Error: unresolved refinement vertex")
                 return
             coord, part_index = anchor
             refinements.append(RefinementSpec(
-                at=coord, fine_size=mesh_config['local_fine_size'],
-                radius=mesh_config['local_radius'], scope='local',
-                part_index=part_index))
-        if mesh_config.get('contact_refine_enabled'):
-            anchor = self._resolve_vertex_anchor(self._refine_contact)
-            if anchor is None:
-                self._show_error(
-                    "Mesh Error",
-                    "Contact refinement needs a vertex.\n"
-                    "Click \"Pick…\" in the mesh dialog to choose one."
-                )
-                self.status_label.set_text("Error: no vertex for refinement")
-                return
-            coord, _part = anchor
-            refinements.append(RefinementSpec(
-                at=coord, fine_size=mesh_config['contact_fine_size'],
-                radius=mesh_config['contact_radius'], scope='contact'))
+                at=coord, fine_size=region['fine_size'],
+                radius=region['radius'], scope=region['scope'],
+                part_index=part_index if region['scope'] == 'local' else None))
 
         builder = self.model_builder
         if builder is None:
@@ -931,8 +916,7 @@ class CadQueryApp(Gtk.Window):
         self._picked_faces = []
         self._picked_vertices = []
         self._cap_face = None
-        self._refine_local = None
-        self._refine_contact = None
+        self._refinements = []
         self._mesh_settings = None
         self._sync_menu_sensitivity()
 
@@ -942,8 +926,7 @@ class CadQueryApp(Gtk.Window):
         self._picked_faces = []
         self._picked_vertices = []
         self._cap_face = None
-        self._refine_local = None
-        self._refine_contact = None
+        self._refinements = []
         self._mesh_settings = None
         self._sync_menu_sensitivity()
 

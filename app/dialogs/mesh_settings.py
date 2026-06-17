@@ -1,215 +1,248 @@
 """
 mesh_settings.py - Mesh settings dialog for configuring element size and type.
+
+Tabbed layout: General (type / size / sag), Refinement (a table of local/contact
+refinement regions), and Extruded Hex. The Refinement tab holds a list so the
+mesher can be given several regions at once; per-part controls will later become
+their own tab (see docs/plans/Part-Specific-Mesh-Controls.md).
 """
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+from gi.repository import Gdk, Gtk
 
-# Custom dialog responses: the user clicked a "Pick…" button to choose a cap
-# face or a refinement vertex. The caller closes the dialog, runs the picker,
-# and reopens with ``initial`` set so the other settings survive the round-trip.
-RESPONSE_PICK_CAP = 1
-RESPONSE_PICK_LOCAL_VERTEX = 2
-RESPONSE_PICK_CONTACT_VERTEX = 3
+# Custom dialog responses. The caller closes the dialog, runs a picker, and
+# reopens with ``initial`` + ``refinements`` set so other settings survive the
+# round-trip.
+RESPONSE_PICK_CAP = 1        # pick the extruded-hex cap face
+RESPONSE_ADD_LOCAL = 2       # pick a vertex, add a local refinement region
+RESPONSE_ADD_CONTACT = 3     # pick a vertex, add a contact refinement region
+
+# Refinement-region table columns.
+_COL_SCOPE, _COL_VERTEX, _COL_FINE, _COL_RADIUS, _COL_LABEL = range(5)
 
 
-def ask_mesh_settings(parent, cap_face_pid=None, local_vertex_pid=None,
-                      contact_vertex_pid=None, initial=None):
+def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None):
     """Show a dialog for mesh generation settings.
 
     Args:
         parent: Parent GTK window.
-        cap_face_pid: PersistentID of the cap face currently chosen for
-            extruded hex, or None. Shown read-only.
-        local_vertex_pid: PersistentID of the vertex chosen for local
-            refinement, or None. Shown read-only.
-        contact_vertex_pid: PersistentID of the vertex chosen for contact
-            refinement, or None. Shown read-only.
-        initial: Optional dict of prior field values to restore (returned by a
-            previous call) so settings survive a "Pick…" round-trip.
+        cap_face_pid: PersistentID of the cap face for extruded hex, or None.
+        refinements: List of refinement-region dicts to populate the table,
+            each ``{scope, vertex_pid, vertex_label, fine_size, radius}``.
+        initial: Optional dict of prior non-refinement field values to restore
+            so settings survive a "Pick…" / "Add…" round-trip.
 
     Returns:
-        ``None`` if cancelled, otherwise a dict carrying every field value plus
-        ``'_action'``: ``'ok'`` when accepted (with ``'extrusion'`` set to
-        ``{'cap_face', 'num_layers'}`` when extruded hex is enabled, else None),
-        or ``'pick_cap'`` / ``'pick_local_vertex'`` / ``'pick_contact_vertex'``
-        when the user asked to pick the corresponding entity.
+        ``None`` if cancelled, otherwise a dict of field values plus
+        ``'refinements'`` (the table's regions) and ``'_action'``: ``'ok'``,
+        ``'pick_cap'``, ``'add_local'``, or ``'add_contact'``.
     """
     initial = initial or {}
+    refinements = refinements or []
     dialog = Gtk.Dialog(title="Mesh Settings", transient_for=parent, modal=True)
     dialog.add_buttons(
         Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
         Gtk.STOCK_OK, Gtk.ResponseType.OK,
     )
     dialog.set_default_response(Gtk.ResponseType.OK)
-    dialog.set_resizable(False)
+    dialog.set_default_size(480, 380)
 
     content = dialog.get_content_area()
-    content.set_spacing(10)
-    content.set_margin_start(15)
-    content.set_margin_end(15)
-    content.set_margin_top(10)
-    content.set_margin_bottom(5)
+    content.set_spacing(8)
+    content.set_margin_start(10)
+    content.set_margin_end(10)
+    content.set_margin_top(8)
+    content.set_margin_bottom(6)
 
-    # Mesh type
-    type_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    type_label = Gtk.Label(label="Mesh Type:")
-    type_label.set_halign(Gtk.Align.START)
-    type_label.set_width_chars(14)
-    type_box.pack_start(type_label, False, False, 0)
+    notebook = Gtk.Notebook()
+    content.pack_start(notebook, True, True, 0)
 
+    def _page(title):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        notebook.append_page(box, Gtk.Label(label=title))
+        return box
+
+    def _labeled_row(parent_box, label_text):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lbl = Gtk.Label(label=label_text)
+        lbl.set_halign(Gtk.Align.START)
+        lbl.set_width_chars(14)
+        row.pack_start(lbl, False, False, 0)
+        parent_box.pack_start(row, False, False, 0)
+        return row
+
+    # ----- General tab -------------------------------------------------------
+    general = _page("General")
+
+    type_row = _labeled_row(general, "Mesh Type:")
     mesh_type_combo = Gtk.ComboBoxText()
     types = ["tet4", "tet10", "hex8", "hex20", "hex27"]
     for t in types:
         mesh_type_combo.append_text(t)
     mesh_type_combo.set_active(types.index(initial.get('mesh_type', 'tet4'))
                                if initial.get('mesh_type') in types else 0)
-    type_box.pack_start(mesh_type_combo, True, True, 0)
-    content.pack_start(type_box, False, False, 0)
+    type_row.pack_start(mesh_type_combo, True, True, 0)
 
-    # Element size
-    size_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    size_label = Gtk.Label(label="Element Size:")
-    size_label.set_halign(Gtk.Align.START)
-    size_label.set_width_chars(14)
-    size_box.pack_start(size_label, False, False, 0)
-
-    adjustment = Gtk.Adjustment(value=5.0, lower=0.01, upper=1000.0,
-                                step_increment=0.5, page_increment=5.0)
+    size_row = _labeled_row(general, "Element Size:")
     element_size_spin = Gtk.SpinButton()
-    element_size_spin.set_adjustment(adjustment)
+    element_size_spin.set_adjustment(Gtk.Adjustment(
+        value=5.0, lower=0.01, upper=1000.0,
+        step_increment=0.5, page_increment=5.0))
     element_size_spin.set_digits(2)
     element_size_spin.set_value(initial.get('element_size', 5.0))
     element_size_spin.set_activates_default(True)
-    size_box.pack_start(element_size_spin, True, True, 0)
-    content.pack_start(size_box, False, False, 0)
+    size_row.pack_start(element_size_spin, True, True, 0)
 
-    # Relative sag tolerance (optional curvature-driven refinement)
-    sag_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    sag_label = Gtk.Label(label="Sag Tolerance:")
-    sag_label.set_halign(Gtk.Align.START)
-    sag_label.set_width_chars(14)
-    sag_box.pack_start(sag_label, False, False, 0)
-
+    sag_row = _labeled_row(general, "Sag Tolerance:")
     sag_check = Gtk.CheckButton()
     sag_check.set_tooltip_text(
         "Refine curved faces so the chord sag stays below this fraction "
-        "of the radius (S = δ/R). Leave unchecked to disable curvature "
-        "refinement."
-    )
+        "of the radius (S = δ/R). Leave unchecked to disable.")
     sag_check.set_active(bool(initial.get('sag_enabled', False)))
-    sag_box.pack_start(sag_check, False, False, 0)
-
-    sag_adjustment = Gtk.Adjustment(value=0.01, lower=0.0001, upper=1.0,
-                                    step_increment=0.001, page_increment=0.01)
+    sag_row.pack_start(sag_check, False, False, 0)
     sag_spin = Gtk.SpinButton()
-    sag_spin.set_adjustment(sag_adjustment)
+    sag_spin.set_adjustment(Gtk.Adjustment(
+        value=0.01, lower=0.0001, upper=1.0,
+        step_increment=0.001, page_increment=0.01))
     sag_spin.set_digits(4)
     sag_spin.set_value(initial.get('sag_value', 0.01))
     sag_spin.set_sensitive(sag_check.get_active())
     sag_spin.set_activates_default(True)
-    sag_box.pack_start(sag_spin, True, True, 0)
+    sag_row.pack_start(sag_spin, True, True, 0)
     sag_check.connect(
         "toggled", lambda btn: sag_spin.set_sensitive(btn.get_active()))
-    content.pack_start(sag_box, False, False, 0)
 
-    # --- Local / contact refinement around a picked vertex -------------------
-    content.pack_start(
-        Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+    # ----- Refinement tab ----------------------------------------------------
+    refine_page = _page("Refinement")
+    hint = Gtk.Label()
+    hint.set_markup(
+        "<small>Fine mesh near a vertex, coarse away. Add regions, then edit "
+        "Fine Size / Refine Radius inline.</small>")
+    hint.set_halign(Gtk.Align.START)
+    hint.set_line_wrap(True)
+    refine_page.pack_start(hint, False, False, 0)
 
-    def _refine_section(title, tooltip, prefix, vertex_pid, pick_response):
-        """Build one refinement section; return (check, fine_spin, radius_spin,
-        sync) where sync() re-applies row sensitivity from the check state."""
-        check = Gtk.CheckButton(label=title)
-        check.set_tooltip_text(tooltip)
-        check.set_active(bool(initial.get(prefix + '_refine_enabled', False)))
-        content.pack_start(check, False, False, 0)
+    # scope, vertex_pid, fine, radius (all str), vertex_label
+    store = Gtk.ListStore(str, str, str, str, str)
+    for r in refinements:
+        store.append([
+            r.get('scope', ''), r.get('vertex_pid', ''),
+            f"{float(r.get('fine_size', 0.5)):g}",
+            f"{float(r.get('radius', 2.0)):g}",
+            r.get('vertex_label', ''),
+        ])
 
-        at_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        at_label = Gtk.Label(label="Refine At:")
-        at_label.set_halign(Gtk.Align.START)
-        at_label.set_width_chars(14)
-        at_box.pack_start(at_label, False, False, 0)
-        at_value = Gtk.Label(label=(vertex_pid or "(none)"))
-        at_value.set_halign(Gtk.Align.START)
-        at_box.pack_start(at_value, True, True, 0)
-        pick = Gtk.Button.new_with_label("Pick…")
-        pick.set_tooltip_text("Pick the anchor vertex in the 3D viewer")
-        pick.connect("clicked", lambda *_: dialog.response(pick_response))
-        at_box.pack_start(pick, False, False, 0)
-        content.pack_start(at_box, False, False, 0)
+    tree = Gtk.TreeView(model=store)
+    tree.set_tooltip_text(
+        "Each row refines around one picked vertex. 'local' refines only that "
+        "part; 'contact' refines every part meeting at the vertex.")
 
-        fine_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        fine_label = Gtk.Label(label="Fine Size:")
-        fine_label.set_halign(Gtk.Align.START)
-        fine_label.set_width_chars(14)
-        fine_box.pack_start(fine_label, False, False, 0)
-        fine_spin = Gtk.SpinButton()
-        fine_spin.set_adjustment(Gtk.Adjustment(
-            value=0.5, lower=0.001, upper=1000.0,
-            step_increment=0.1, page_increment=1.0))
-        fine_spin.set_digits(3)
-        fine_spin.set_value(initial.get(prefix + '_fine_size', 0.5))
-        fine_spin.set_activates_default(True)
-        fine_box.pack_start(fine_spin, True, True, 0)
-        content.pack_start(fine_box, False, False, 0)
+    # Track an in-progress cell edit so a click on OK / Add (which doesn't move
+    # focus out of the entry, so GTK emits 'editing-canceled' not 'edited') still
+    # commits the typed value. Mirrors the rename dialog's fix.
+    active_edit = {}
 
-        radius_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        radius_label = Gtk.Label(label="Refine Radius:")
-        radius_label.set_halign(Gtk.Align.START)
-        radius_label.set_width_chars(14)
-        radius_box.pack_start(radius_label, False, False, 0)
-        radius_spin = Gtk.SpinButton()
-        radius_spin.set_adjustment(Gtk.Adjustment(
-            value=2.0, lower=0.001, upper=1000.0,
-            step_increment=0.5, page_increment=5.0))
-        radius_spin.set_digits(3)
-        radius_spin.set_value(initial.get(prefix + '_radius', 2.0))
-        radius_spin.set_activates_default(True)
-        radius_box.pack_start(radius_spin, True, True, 0)
-        content.pack_start(radius_box, False, False, 0)
+    def _set_cell(path, col, text):
+        try:
+            if float(text) > 0:
+                store[path][col] = f"{float(text):g}"
+        except (TypeError, ValueError):
+            pass  # reject non-numeric / non-positive; keep prior value
 
-        rows = (at_box, fine_box, radius_box)
+    def _flush_edit():
+        if {'path', 'col', 'text'} <= active_edit.keys():
+            _set_cell(active_edit['path'], active_edit['col'],
+                      active_edit['text'])
+        active_edit.clear()
 
-        def _sync(*_):
-            on = check.get_active() and check.get_sensitive()
-            for r in rows:
-                r.set_sensitive(on)
+    def _on_editable_key(_editable, event):
+        if event.keyval == Gdk.KEY_Escape:
+            active_edit['escaped'] = True
+        return False
 
-        check.connect("toggled", _sync)
-        _sync()
-        return check, fine_spin, radius_spin, _sync
+    def _attach_editable(renderer, col):
+        renderer.set_property("editable", True)
 
-    local_check, local_fine_spin, local_radius_spin, _local_sync = (
-        _refine_section(
-            "Local refinement (one part, near a vertex)",
-            "Refine only the part that owns the picked vertex.",
-            "local", local_vertex_pid, RESPONSE_PICK_LOCAL_VERTEX))
-    contact_check, contact_fine_spin, contact_radius_spin, _contact_sync = (
-        _refine_section(
-            "Contact refinement (all parts near a vertex)",
-            "Refine every part meeting at the picked vertex (e.g. a contact "
-            "point).",
-            "contact", contact_vertex_pid, RESPONSE_PICK_CONTACT_VERTEX))
+        def _on_start(_r, editable, path):
+            active_edit.clear()
+            active_edit.update(col=col, path=path, text=editable.get_text())
+            editable.connect(
+                "changed",
+                lambda e: active_edit.__setitem__('text', e.get_text()))
+            editable.connect("key-press-event", _on_editable_key)
 
-    # --- Extruded hex8 -------------------------------------------------------
-    content.pack_start(
-        Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+        def _on_edited(_r, path, text):
+            _set_cell(path, col, text)
+            active_edit.clear()
 
+        def _on_canceled(_r):
+            if active_edit.get('escaped'):
+                active_edit.clear()
+            else:
+                _flush_edit()
+
+        renderer.connect("editing-started", _on_start)
+        renderer.connect("edited", _on_edited)
+        renderer.connect("editing-canceled", _on_canceled)
+
+    for title, col, editable in (
+            ("Scope", _COL_SCOPE, False),
+            ("Vertex", _COL_VERTEX, False),
+            ("Fine Size", _COL_FINE, True),
+            ("Refine Radius", _COL_RADIUS, True)):
+        renderer = Gtk.CellRendererText()
+        if editable:
+            _attach_editable(renderer, col)
+        column = Gtk.TreeViewColumn(title, renderer, text=col)
+        column.set_expand(True)
+        tree.append_column(column)
+
+    scroller = Gtk.ScrolledWindow()
+    scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    scroller.set_hexpand(True)
+    scroller.set_vexpand(True)
+    scroller.add(tree)
+    refine_page.pack_start(scroller, True, True, 0)
+
+    button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+    add_local_btn = Gtk.Button.new_with_label("Add Local…")
+    add_local_btn.set_tooltip_text("Pick a vertex; refine only its part")
+    add_local_btn.connect(
+        "clicked", lambda *_: dialog.response(RESPONSE_ADD_LOCAL))
+    add_contact_btn = Gtk.Button.new_with_label("Add Contact…")
+    add_contact_btn.set_tooltip_text(
+        "Pick a vertex; refine all parts meeting there")
+    add_contact_btn.connect(
+        "clicked", lambda *_: dialog.response(RESPONSE_ADD_CONTACT))
+    remove_btn = Gtk.Button.new_with_label("Remove")
+
+    def _on_remove(_btn):
+        _, treeiter = tree.get_selection().get_selected()
+        if treeiter is not None:
+            store.remove(treeiter)
+
+    remove_btn.connect("clicked", _on_remove)
+    button_row.pack_start(add_local_btn, False, False, 0)
+    button_row.pack_start(add_contact_btn, False, False, 0)
+    button_row.pack_start(remove_btn, False, False, 0)
+    refine_page.pack_start(button_row, False, False, 0)
+
+    # ----- Extruded Hex tab --------------------------------------------------
+    hex_page = _page("Extruded Hex")
     extrude_check = Gtk.CheckButton(label="Extruded hex (extrude a cap face)")
     extrude_check.set_tooltip_text(
         "Build structured hex8 by quad-meshing a cap face and extruding it "
-        "through the thickness. Requires elementType hex8."
-    )
+        "through the thickness. Requires elementType hex8; mutually exclusive "
+        "with refinement.")
     extrude_check.set_active(bool(initial.get('extrude_enabled', False)))
-    content.pack_start(extrude_check, False, False, 0)
+    hex_page.pack_start(extrude_check, False, False, 0)
 
-    cap_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    cap_label = Gtk.Label(label="Cap Face:")
-    cap_label.set_halign(Gtk.Align.START)
-    cap_label.set_width_chars(14)
-    cap_box.pack_start(cap_label, False, False, 0)
+    cap_box = _labeled_row(hex_page, "Cap Face:")
     cap_value = Gtk.Label(label=(cap_face_pid or "(none)"))
     cap_value.set_halign(Gtk.Align.START)
     cap_box.pack_start(cap_value, True, True, 0)
@@ -217,49 +250,56 @@ def ask_mesh_settings(parent, cap_face_pid=None, local_vertex_pid=None,
     pick_btn.set_tooltip_text("Pick the cap face in the 3D viewer")
     pick_btn.connect("clicked", lambda *_: dialog.response(RESPONSE_PICK_CAP))
     cap_box.pack_start(pick_btn, False, False, 0)
-    content.pack_start(cap_box, False, False, 0)
 
-    layers_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-    layers_label = Gtk.Label(label="Layers:")
-    layers_label.set_halign(Gtk.Align.START)
-    layers_label.set_width_chars(14)
-    layers_box.pack_start(layers_label, False, False, 0)
-    layers_adjustment = Gtk.Adjustment(value=1, lower=1, upper=1000,
-                                       step_increment=1, page_increment=5)
+    layers_box = _labeled_row(hex_page, "Layers:")
     layers_spin = Gtk.SpinButton()
-    layers_spin.set_adjustment(layers_adjustment)
+    layers_spin.set_adjustment(Gtk.Adjustment(
+        value=1, lower=1, upper=1000, step_increment=1, page_increment=5))
     layers_spin.set_digits(0)
     layers_spin.set_value(initial.get('num_layers', 1))
     layers_spin.set_activates_default(True)
     layers_box.pack_start(layers_spin, True, True, 0)
-    content.pack_start(layers_box, False, False, 0)
 
-    def _sync_extrude_sensitivity(*_):
+    def _sync_sensitivity(*_):
         is_hex8 = mesh_type_combo.get_active_text() == "hex8"
         extrude_check.set_sensitive(is_hex8)
-        enabled = is_hex8 and extrude_check.get_active()
-        cap_box.set_sensitive(enabled)
-        layers_box.set_sensitive(enabled)
-        # Refinement is mutually exclusive with extruded hex; gray it out while
-        # extruding, then re-apply each section's own row sensitivity.
-        local_check.set_sensitive(not enabled)
-        contact_check.set_sensitive(not enabled)
-        _local_sync()
-        _contact_sync()
+        extruding = is_hex8 and extrude_check.get_active()
+        cap_box.set_sensitive(extruding)
+        layers_box.set_sensitive(extruding)
+        # Refinement and extruded hex are mutually exclusive.
+        refine_page.set_sensitive(not extruding)
 
-    mesh_type_combo.connect("changed", _sync_extrude_sensitivity)
-    extrude_check.connect("toggled", _sync_extrude_sensitivity)
-    _sync_extrude_sensitivity()
+    mesh_type_combo.connect("changed", _sync_sensitivity)
+    extrude_check.connect("toggled", _sync_sensitivity)
+    _sync_sensitivity()
 
     dialog.show_all()
+    # Reopen on the tab the user was working in (survives a Pick…/Add… round-trip
+    # and is restored next invocation), not always General.
+    restore_tab = initial.get('active_tab', 0)
+    notebook.set_current_page(restore_tab if restore_tab and restore_tab > 0
+                              else 0)
     response = dialog.run()
 
     mesh_type = mesh_type_combo.get_active_text()
     sag_enabled = sag_check.get_active()
     extrude_enabled = mesh_type == "hex8" and extrude_check.get_active()
-    # Refinement is disabled while extruding (mutually exclusive).
-    local_enabled = local_check.get_active() and not extrude_enabled
-    contact_enabled = contact_check.get_active() and not extrude_enabled
+
+    # Serialize the region table (flush any in-progress cell edit first).
+    _flush_edit()
+    regions = []
+    for row in store:
+        try:
+            fine = float(row[_COL_FINE])
+            radius = float(row[_COL_RADIUS])
+        except (TypeError, ValueError):
+            continue
+        regions.append({
+            'scope': row[_COL_SCOPE], 'vertex_pid': row[_COL_VERTEX],
+            'vertex_label': row[_COL_LABEL], 'fine_size': fine,
+            'radius': radius,
+        })
+
     values = {
         'mesh_type': mesh_type,
         'element_size': element_size_spin.get_value(),
@@ -268,23 +308,22 @@ def ask_mesh_settings(parent, cap_face_pid=None, local_vertex_pid=None,
         'relative_sag_tolerance': sag_spin.get_value() if sag_enabled else None,
         'extrude_enabled': extrude_enabled,
         'num_layers': int(layers_spin.get_value()),
-        'local_refine_enabled': local_enabled,
-        'local_fine_size': local_fine_spin.get_value(),
-        'local_radius': local_radius_spin.get_value(),
-        'contact_refine_enabled': contact_enabled,
-        'contact_fine_size': contact_fine_spin.get_value(),
-        'contact_radius': contact_radius_spin.get_value(),
+        # Refinement is suppressed while extruding (mutually exclusive), but the
+        # rows are kept so they survive a toggle / round-trip.
+        'refinements': [] if extrude_enabled else regions,
+        '_all_refinements': regions,
+        'active_tab': notebook.get_current_page(),
     }
     dialog.destroy()
 
     if response == RESPONSE_PICK_CAP:
         values['_action'] = 'pick_cap'
         return values
-    if response == RESPONSE_PICK_LOCAL_VERTEX:
-        values['_action'] = 'pick_local_vertex'
+    if response == RESPONSE_ADD_LOCAL:
+        values['_action'] = 'add_local'
         return values
-    if response == RESPONSE_PICK_CONTACT_VERTEX:
-        values['_action'] = 'pick_contact_vertex'
+    if response == RESPONSE_ADD_CONTACT:
+        values['_action'] = 'add_contact'
         return values
     if response != Gtk.ResponseType.OK:
         return None
