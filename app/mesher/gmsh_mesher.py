@@ -181,8 +181,10 @@ class ExtrusionSpec:
     from ``relative_sag_tolerance`` (applied locally to the cap), so a full
     extruded-hex job is ``ExtrusionSpec`` + those two scalars.
     """
-    cap_face: str
+    cap_face: str = None              # legacy PersistentID ("F4"); or use:
     num_layers: int = 1
+    cap_face_at: tuple = None         # cap-face centroid (geometric, preferred)
+    cap_face_area: float = None       # optional area for the self-check
 
 
 @dataclass
@@ -504,7 +506,7 @@ class GmshMesher:
         is only a soft hint gmsh's 3D mesher ignores (non-uniform layering).
         """
         self._import_geometry()
-        cap_tag = self._surface_tag_for_pid(extrusion.cap_face)
+        cap_tag = self._cap_tag(extrusion)
         topo = self._extrusion_topology(cap_tag)
 
         # Mesh the cap with quads (+ optional sag), then clear every other
@@ -693,6 +695,25 @@ class GmshMesher:
 
         for (ent, etype), (tags, conn) in add_elems.items():
             gmsh.model.mesh.addElementsByType(ent, etype, tags, conn)
+
+    def _cap_tag(self, extrusion: "ExtrusionSpec") -> int:
+        """Resolve the extrusion cap face to a gmsh surface tag.
+
+        Geometric (``cap_face_at`` centroid, resolved via the source-agnostic
+        resolver) is preferred; falls back to the legacy ``cap_face`` PID.
+        """
+        if extrusion.cap_face_at is not None:
+            tags = self._resolver.resolve_face(
+                extrusion.cap_face_at, area=extrusion.cap_face_area)
+            if len(tags) != 1:
+                raise MeshValidationError(
+                    f"cap-face anchor {tuple(extrusion.cap_face_at)} resolved to "
+                    f"{tags} (expected exactly one face).")
+            return tags[0]
+        if extrusion.cap_face is None:
+            raise MeshValidationError(
+                "extrusion needs a cap face: cap_face_at (centroid) or cap_face.")
+        return self._surface_tag_for_pid(extrusion.cap_face)
 
     def _surface_tag_for_pid(self, pid: str) -> int:
         """Map a CADModelData face PersistentID ('F{n}') to its gmsh tag (n+1)."""

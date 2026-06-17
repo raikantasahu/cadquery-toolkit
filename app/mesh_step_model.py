@@ -276,7 +276,15 @@ def main():
         num_layers = int(extrusion_cfg.get("numLayers", 1))
         if num_layers < 1:
             parser.error(f"numLayers must be >= 1 (got {num_layers})")
-        extrusion = ExtrusionSpec(cap_face=str(cap_face), num_layers=num_layers)
+        if isinstance(cap_face, (list, tuple)) and len(cap_face) == 3:
+            area = extrusion_cfg.get("capFaceArea")
+            extrusion = ExtrusionSpec(
+                cap_face_at=tuple(float(c) for c in cap_face),
+                cap_face_area=float(area) if area is not None else None,
+                num_layers=num_layers)
+        else:
+            extrusion = ExtrusionSpec(cap_face=str(cap_face),
+                                      num_layers=num_layers)
 
     # Local/contact refinement (tet & recombined-hex paths only).
     refinements = _parse_refinements(mesh_cfg, parser)
