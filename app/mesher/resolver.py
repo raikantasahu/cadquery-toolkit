@@ -181,7 +181,15 @@ class GeometricResolver:
     def _resolve_anchor(self, a):
         kind = a.get("kind")
         if kind == "vertex":
-            return self.resolve_vertex(a["at"], volume=a.get("volume"))
+            volume = a.get("volume")
+            if volume is None and a.get("part") is not None:
+                vols = gmsh.model.getEntities(3)
+                pi = a["part"]
+                if not 0 <= pi < len(vols):
+                    raise EntityResolutionError(
+                        f"part index {pi} out of range (0..{len(vols) - 1})")
+                volume = vols[pi][1]
+            return self.resolve_vertex(a["at"], volume=volume)
         if kind == "edge":
             return self.resolve_edge(a["samples"])
         if kind == "face":

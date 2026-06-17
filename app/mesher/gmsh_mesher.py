@@ -911,19 +911,24 @@ class GmshMesher:
 
     def save_as_meshdata_xml(self, filename: str, mesh_id: int = 1,
                              owner: str = None,
-                             entity_owners: dict = None) -> None:
+                             entity_owners: dict = None,
+                             selections: list = None) -> None:
         """Write the generated mesh to a MeshData XML file.
 
-        Delegates to :func:`mesher.export.meshdata_xml_exporter.save_as_meshdata_xml`.
-        Does NOT finalize Gmsh.
+        ``selections`` are geometric owner entries resolved via the geometric
+        resolver; ``entity_owners`` is the legacy PersistentID fallback.
+        Delegates to the XML exporter; does NOT finalize Gmsh.
         """
         if not self._initialized:
             raise RuntimeError("No mesh generated yet. Call generate() first.")
+        owner_by_tag = (self._resolver.build_owner_map(selections)
+                        if selections else None)
         from .export.meshdata_xml_exporter import save_as_meshdata_xml
         save_as_meshdata_xml(
             filename, mesh_id=mesh_id,
             owner=owner or self.model_name,
             entity_owners=entity_owners,
+            owner_by_tag=owner_by_tag,
         )
 
     def save_as_meshdata_json(self, filename: str, mesh_id: int = 1,

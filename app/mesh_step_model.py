@@ -100,6 +100,55 @@ def _parse_refinements(mesh_cfg, parser):
     return specs
 
 
+def _parse_owners(owners_cfg, parser):
+    """Return ``(entity_owners, selections)`` from the config's ``owners``.
+
+    ``owners`` may be the legacy mapping ``{PersistentID: label}`` (returned as
+    entity_owners) or a geometric list of entries with ``owner``, ``kind``
+    (vertex/edge/face/part) and geometry (``at: [x,y,z]`` for vertex/face/part,
+    ``samples: [[x,y,z], ...]`` for edge; faces accept ``area``; vertices accept
+    ``part`` for disambiguation) — returned as resolver selections.
+    """
+    if not owners_cfg:
+        return {}, None
+    if isinstance(owners_cfg, dict):
+        return owners_cfg, None
+    if not isinstance(owners_cfg, list):
+        parser.error("owners must be a mapping (legacy) or a list (geometric)")
+
+    selections = []
+    for e in owners_cfg:
+        if not isinstance(e, dict):
+            parser.error("each geometric owner must be a mapping")
+        owner, kind = e.get("owner"), e.get("kind")
+        if not owner or kind not in ("vertex", "edge", "face", "part"):
+            parser.error("geometric owner needs 'owner' and 'kind' "
+                         "(vertex|edge|face|part)")
+        if kind == "edge":
+            samples = e.get("samples")
+            if not (isinstance(samples, list) and len(samples) >= 2):
+                parser.error("edge owner needs 'samples': [[x,y,z], ...] (>=2)")
+            anchor = {"kind": "edge",
+                      "samples": [tuple(map(float, s)) for s in samples]}
+        else:
+            at = e.get("at")
+            if not (isinstance(at, (list, tuple)) and len(at) == 3):
+                parser.error(f"{kind} owner needs 'at': [x, y, z]")
+            at = tuple(map(float, at))
+            if kind == "vertex":
+                anchor = {"kind": "vertex", "at": at}
+                if e.get("part") is not None:
+                    anchor["part"] = int(e["part"])
+            elif kind == "part":
+                anchor = {"kind": "part", "centroid": at}
+            else:
+                anchor = {"kind": "face", "centroid": at}
+                if e.get("area") is not None:
+                    anchor["area"] = float(e["area"])
+        selections.append((anchor, str(owner), bool(e.get("required", True))))
+    return {}, selections
+
+
 _DIM_LABEL = {0: "vertex", 1: "edge", 2: "face", 3: "part"}
 _DIM_MEASURE = {1: "length", 2: "area", 3: "volume"}
 
@@ -190,7 +239,7 @@ def main():
 
     mesh_cfg = config.get("mesh", {})
     output_cfg = config.get("output", {})
-    entity_owners = config.get("owners", {})
+    entity_owners, owner_selections = _parse_owners(config.get("owners"), parser)
 
     element_type_str = mesh_cfg.get("elementType", "tet4")
     if element_type_str not in _MESH_TYPES:
@@ -274,10 +323,12 @@ def main():
     if output_format == "xml":
         mesher.save_as_meshdata_xml(
             str(output_path), owner=owner, entity_owners=entity_owners,
+            selections=owner_selections,
         )
     elif output_format == "json":
         mesher.save_as_meshdata_json(
             str(output_path), owner=owner, entity_owners=entity_owners,
+            selections=owner_selections,
         )
     else:
         mesher.save(str(output_path))

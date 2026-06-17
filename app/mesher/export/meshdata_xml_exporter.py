@@ -12,7 +12,8 @@ from .meshdata import SCHEMA, VERSION, collect
 
 def save_as_meshdata_xml(filename: str, mesh_id: int = 1,
                          owner: str = "model",
-                         entity_owners: dict = None) -> None:
+                         entity_owners: dict = None,
+                         owner_by_tag: dict = None) -> None:
     """
     Write the current Gmsh mesh to a MeshData XML file.
 
@@ -20,10 +21,12 @@ def save_as_meshdata_xml(filename: str, mesh_id: int = 1,
         filename: Output file path (should end with .xml).
         mesh_id: Integer id for the ``<Mesh>`` element.
         owner: Owner string for the ``<Mesh>`` element.
-        entity_owners: Mapping from CADModelData PersistentID to owner
-            string.  See :func:`meshdata.collect` for details.
+        entity_owners: Legacy PersistentID -> owner mapping (fallback).
+        owner_by_tag: Geometry-resolved ``{(dim, tag): owner}`` mapping
+            (preferred). See :func:`meshdata.collect`.
     """
-    data = collect(mesh_id=mesh_id, owner=owner, entity_owners=entity_owners)
+    data = collect(mesh_id=mesh_id, owner=owner, entity_owners=entity_owners,
+                   owner_by_tag=owner_by_tag)
 
     root = Element(
         "Mesh",
