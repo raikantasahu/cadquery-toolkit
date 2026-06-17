@@ -436,6 +436,27 @@ class GmshMesher:
         """
         gmsh.initialize()
         self._initialized = True
+        # On success the session stays open so the caller can save/collect; on
+        # ANY failure (e.g. the MeshValidationError the hex-validity gate
+        # raises) tear it down rather than leak an initialized global session +
+        # half-built model onto the next generate(). finalize() is idempotent,
+        # so a caller's own error handling stays a no-op.
+        try:
+            return self._run_generate(mesh_type, element_size,
+                                      relative_sag_tolerance, extrusion,
+                                      refinements)
+        except Exception:
+            self.finalize()
+            raise
+
+    def _run_generate(self, mesh_type: MeshType, element_size: float,
+                      relative_sag_tolerance, extrusion,
+                      refinements) -> dict:
+        """Build the mesh in the already-initialized gmsh session.
+
+        Split out of :meth:`generate` so the init + finalize-on-error wrapper
+        there stays small; this is the body that runs between them.
+        """
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add(self.model_name)
 
