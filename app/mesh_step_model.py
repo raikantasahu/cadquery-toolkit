@@ -100,12 +100,53 @@ def _parse_refinements(mesh_cfg, parser):
     return specs
 
 
+_DIM_LABEL = {0: "vertex", 1: "edge", 2: "face", 3: "part"}
+_DIM_MEASURE = {1: "length", 2: "area", 3: "volume"}
+
+
+def _list_entities(step_path, name):
+    """Print the model's entity manifest (geometry per entity) and return."""
+    import gmsh
+    from mesher.resolver import GeometricResolver
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add(name)
+    try:
+        gmsh.merge(step_path)
+        gmsh.model.occ.synchronize()
+        entities = GeometricResolver().describe_entities()
+    finally:
+        gmsh.finalize()
+    _print_manifest(entities)
+
+
+def _print_manifest(entities):
+    by_dim = {}
+    for e in entities:
+        by_dim.setdefault(e["dim"], []).append(e)
+    for dim in range(4):
+        ents = by_dim.get(dim, [])
+        if not ents:
+            continue
+        print(f"\n# {len(ents)} {_DIM_LABEL[dim]}(s)")
+        for e in sorted(ents, key=lambda x: x["tag"]):
+            cx, cy, cz = e["com"]
+            line = (f"  {_DIM_LABEL[dim]} {e['tag']}: "
+                    f"at [{cx:.4g}, {cy:.4g}, {cz:.4g}]")
+            if dim in _DIM_MEASURE:
+                line += f"  {_DIM_MEASURE[dim]}={e['meas']:.4g}"
+            if e.get("name"):
+                line += f"  name={e['name']!r}"
+            print(line)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate a volumetric mesh from a STEP file.",
     )
     parser.add_argument("input", help="Path to a .step or .stp file")
-    parser.add_argument("config", help="Path to a YAML mesh config file")
+    parser.add_argument("config", nargs="?",
+                        help="Path to a YAML mesh config file")
     parser.add_argument(
         "-o", "--output",
         help="Output path (defaults to <input>.<ext> based on config format)",
@@ -113,6 +154,11 @@ def main():
     parser.add_argument(
         "--name",
         help="Model name for the Gmsh model (defaults to the input file stem)",
+    )
+    parser.add_argument(
+        "--list-entities", action="store_true",
+        help="Print the model's entity manifest (geometry per vertex/edge/face/"
+             "part, for authoring geometric references) and exit.",
     )
     args = parser.parse_args()
 
@@ -125,6 +171,16 @@ def main():
             f"unexpected input extension '{input_path.suffix}' "
             f"(expected .step or .stp)"
         )
+
+    name = args.name or input_path.stem
+
+    # --- Entity manifest (discovery), then exit ---
+    if args.list_entities:
+        _list_entities(str(input_path), name)
+        return
+
+    if not args.config:
+        parser.error("a config file is required (unless --list-entities)")
 
     # --- Read config ---
     config_path = Path(args.config)

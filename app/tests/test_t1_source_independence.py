@@ -42,3 +42,21 @@ def test_anchors_resolve_across_files_of_same_geometry(nist_dir):
             assert any(sum((a - b) ** 2 for a, b in zip(coms[t], com)) ** 0.5
                        <= _DIST_TOL for t in tags), (
                 f"resolved {tags} not at anchor centroid {com}")
+
+
+def test_manifest_authored_anchors_resolve_across_files(nist_dir):
+    """The manifest/CLI authoring path (Implementation P2): anchors built from
+    one file's manifest resolve on the other file of the same geometry."""
+    with_pmi = os.path.join(nist_dir, "AP203 with PMI",
+                            "nist_ctc_01_asme1_ap203.stp")
+    geom_only = os.path.join(nist_dir, "AP203 geometry only",
+                             "nist_ctc_01_asme1_rd.stp")
+    with gmsh_session(with_pmi):
+        manifest = [(e["com"], e["meas"])
+                    for e in GeometricResolver().describe_entities()
+                    if e["dim"] == 2]
+    assert manifest
+    with gmsh_session(geom_only):
+        r = GeometricResolver()
+        for com, area in manifest:
+            r.resolve_face(com, area=area)  # must resolve, not raise
