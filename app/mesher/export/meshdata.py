@@ -135,8 +135,13 @@ def _volume_adjacency(pos):
     return node_to_elems, centroids
 
 
+_PID_LETTER = {0: "V", 1: "E", 2: "F", 3: "P"}
+
+
 def collect(mesh_id: int = 1, owner: str = "model",
-            entity_owners: Optional[Dict[str, str]] = None) -> MeshData:
+            entity_owners: Optional[Dict[str, str]] = None,
+            owner_by_tag: Optional[Dict[Tuple[int, int], str]] = None
+            ) -> MeshData:
     """
     Collect all mesh data from the active Gmsh session.
 
@@ -157,6 +162,17 @@ def collect(mesh_id: int = 1, owner: str = "model",
         MeshData with all collected data.
     """
     entity_owners = entity_owners or {}
+    owner_by_tag = owner_by_tag or {}
+
+    # Owner of a geometric entity: prefer the geometry-resolved (dim,tag) map
+    # (built by GeometricResolver from geometric selections); fall back to the
+    # legacy PersistentID scheme (F#/V#/P# == gmsh tag-1) only when no resolved
+    # map is supplied. The resolved map is correct across STEP sources; the
+    # legacy offset is not (see docs/plans/Geometric-Entity-Identification/).
+    def _owner(dim, tag, default=None):
+        if (dim, tag) in owner_by_tag:
+            return owner_by_tag[(dim, tag)]
+        return entity_owners.get(f"{_PID_LETTER[dim]}{tag - 1}", default)
 
     # --- Nodes ---
     node_tags, coords, _ = gmsh.model.mesh.getNodes()
@@ -178,8 +194,7 @@ def collect(mesh_id: int = 1, owner: str = "model",
     volumes = gmsh.model.getEntities(dim=3)
 
     for n, (_dim, vol_tag) in enumerate(volumes):
-        pid = f"P{vol_tag - 1}"
-        frag_owner = entity_owners.get(pid, f"part_{n + 1}")
+        frag_owner = _owner(3, vol_tag, f"part_{n + 1}")
 
         elem_types, _, elem_node_tags = gmsh.model.mesh.getElements(3, vol_tag)
         for etype, enodes in zip(elem_types, elem_node_tags):
@@ -289,8 +304,7 @@ def collect(mesh_id: int = 1, owner: str = "model",
 
     # Vertex containers (dim=0)
     for _, vtx_tag in gmsh.model.getEntities(dim=0):
-        pid = f"V{vtx_tag - 1}"
-        owner_str = entity_owners.get(pid)
+        owner_str = _owner(0, vtx_tag)
         if owner_str is None:
             continue
         vtx_node_tags, _, _ = gmsh.model.mesh.getNodes(0, vtx_tag)
@@ -302,8 +316,7 @@ def collect(mesh_id: int = 1, owner: str = "model",
 
     # Edge containers (dim=1)
     for _, curve_tag in gmsh.model.getEntities(dim=1):
-        pid = f"E{curve_tag - 1}"
-        owner_str = entity_owners.get(pid)
+        owner_str = _owner(1, curve_tag)
         if owner_str is None:
             continue
         # includeBoundary so the curve's endpoint-vertex nodes are included,
@@ -319,8 +332,7 @@ def collect(mesh_id: int = 1, owner: str = "model",
 
     # Face containers (dim=2)
     for _, surf_tag in gmsh.model.getEntities(dim=2):
-        pid = f"F{surf_tag - 1}"
-        owner_str = entity_owners.get(pid)
+        owner_str = _owner(2, surf_tag)
         if owner_str is None:
             continue
         # includeBoundary so the face's bounding edge/vertex nodes are included,

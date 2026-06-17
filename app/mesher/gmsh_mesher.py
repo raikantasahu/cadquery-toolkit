@@ -280,19 +280,21 @@ def save_mesh_json(mesher, filename, title=None):
 
 
 def save_mesh_meshdata_json(mesher, filename, owner=None,
-                            entity_owners=None):
+                            entity_owners=None, selections=None):
     """Save a generated mesh to a MeshData JSON file.
 
     Args:
         mesher: A GmshMesher instance returned by create_mesh().
         filename: Output file path (should end with .json).
         owner: Optional owner string for the mesh envelope.
-        entity_owners: Optional ``{persistent_id: owner_string}`` mapping
-            (e.g. ``{"F0": "Face 1"}``); each entry becomes one
-            MeshEntityContainer in the output.
+        selections: Geometric ``(anchor, owner[, required])`` entries resolved to
+            entities via the geometric resolver (the source-agnostic owner path).
+        entity_owners: Legacy ``{persistent_id: owner_string}`` fallback; each
+            entry becomes one MeshEntityContainer in the output.
     """
     mesher.save_as_meshdata_json(
         filename, owner=owner, entity_owners=entity_owners,
+        selections=selections,
     )
 
 
@@ -402,6 +404,7 @@ class GmshMesher:
         self.cq_object = cadquery_object
         self.model_name = model_name
         self._initialized = False
+        self._resolver = None   # GeometricResolver, built after geometry import
 
     def generate(self, mesh_type: MeshType = MeshType.TET4,
                  element_size: float = 5.0,
@@ -925,19 +928,25 @@ class GmshMesher:
 
     def save_as_meshdata_json(self, filename: str, mesh_id: int = 1,
                               owner: str = None,
-                              entity_owners: dict = None) -> None:
+                              entity_owners: dict = None,
+                              selections: list = None) -> None:
         """Write the generated mesh to a MeshData JSON file.
 
-        Delegates to :func:`mesher.export.meshdata_json_exporter.save_as_meshdata_json`.
-        Does NOT finalize Gmsh.
+        ``selections`` are geometric ``(anchor, owner[, required])`` entries
+        resolved to entities via the geometric resolver — the source-agnostic
+        owner path. ``entity_owners`` is the legacy PersistentID fallback.
+        Delegates to the JSON exporter; does NOT finalize Gmsh.
         """
         if not self._initialized:
             raise RuntimeError("No mesh generated yet. Call generate() first.")
+        owner_by_tag = (self._resolver.build_owner_map(selections)
+                        if selections else None)
         from .export.meshdata_json_exporter import save_as_meshdata_json
         save_as_meshdata_json(
             filename, mesh_id=mesh_id,
             owner=owner or self.model_name,
             entity_owners=entity_owners,
+            owner_by_tag=owner_by_tag,
         )
 
     def _import_geometry(self) -> None:
@@ -967,6 +976,11 @@ class GmshMesher:
             gmsh.model.occ.synchronize()
         finally:
             os.unlink(tmp_path)
+
+        # Index the imported geometry so geometric selections can be resolved to
+        # entities (source-agnostic identity; tags persist through meshing).
+        from .resolver import GeometricResolver
+        self._resolver = GeometricResolver()
 
     def _configure_mesh(self, mesh_type: MeshType,
                         element_size: float,

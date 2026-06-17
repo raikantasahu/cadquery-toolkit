@@ -10,13 +10,19 @@ Operates on the *current* gmsh model: the caller must have imported geometry and
 called gmsh.model.occ.synchronize() before constructing a resolver. gmsh entity
 tags are per-dimension, so resolution is always within a dimension.
 """
+import logging
 import math
 
 import gmsh
 
+logger = logging.getLogger(__name__)
+
 # Face/extent acceptance band: a matched entity's measure (area/length) must be
 # within this ratio of the reference's (retaincad's ~10%).
 _MEAS_LO, _MEAS_HI = 0.90, 1.10
+
+# Anchor kind -> gmsh dimension.
+_KIND_DIM = {"vertex": 0, "edge": 1, "face": 2, "part": 3}
 
 
 class EntityResolutionError(RuntimeError):
@@ -146,6 +152,45 @@ class GeometricResolver:
             raise EntityResolutionError(
                 f"no part near centroid {tuple(centroid)}")
         return sorted(cands)
+
+    def build_owner_map(self, selections):
+        """Resolve geometric selections to a ``{(dim, tag): owner}`` map.
+
+        Each selection is ``(anchor, owner)`` or ``(anchor, owner, required)``;
+        an anchor is ``{'kind': 'vertex'|'edge'|'face'|'part', ...}``. A required
+        (default) selection that fails to resolve raises; an optional one logs
+        loudly and is skipped (Feature R6). gmsh tags are per-dimension, so the
+        key is ``(dim, tag)``.
+        """
+        owner_by_tag = {}
+        for sel in selections:
+            anchor, owner = sel[0], sel[1]
+            required = sel[2] if len(sel) > 2 else True
+            try:
+                tags = self._resolve_anchor(anchor)
+            except EntityResolutionError as exc:
+                if required:
+                    raise
+                logger.warning("skipping optional selection %r: %s", owner, exc)
+                continue
+            dim = _KIND_DIM[anchor["kind"]]
+            for t in tags:
+                owner_by_tag[(dim, t)] = owner
+        return owner_by_tag
+
+    def _resolve_anchor(self, a):
+        kind = a.get("kind")
+        if kind == "vertex":
+            return self.resolve_vertex(a["at"], volume=a.get("volume"))
+        if kind == "edge":
+            return self.resolve_edge(a["samples"])
+        if kind == "face":
+            return self.resolve_face(a["centroid"], area=a.get("area"),
+                                     edge_anchors=a.get("edge_anchors"),
+                                     facet_samples=a.get("facet_samples"))
+        if kind == "part":
+            return self.resolve_part(a["centroid"])
+        raise EntityResolutionError(f"unknown anchor kind {kind!r}")
 
     # ---------- helpers ----------
     def _near_coms(self, dim, xyz):

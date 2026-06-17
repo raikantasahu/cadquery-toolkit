@@ -1,55 +1,63 @@
-"""Red baseline — the confirmed entity-identification bug (T3 / T11 vertex case).
+"""T3 / T11 (owner-container core) — entity identity via the geometric resolver.
 
-On a multi-part assembly the GUI picker numbers vertices in CAD-traversal order,
-which does NOT match gmsh's STEP-import order, so a picked vertex owner attaches
-its container to the WRONG gmsh vertex. This test asserts the *correct* behavior
-(the container's node sits at the picked vertex's location) and is therefore
-expected to FAIL today; it must flip to passing once the geometric resolver is
-wired in (Implementation P3). `strict=True` makes an unexpected pass a failure,
-so the marker can't be left stale.
+This was the P0 red baseline (picker V# -> wrong gmsh vertex on assemblies).
+P3 routes owner containers through the resolver via geometric selections, so a
+picked vertex/face owner lands on the correct gmsh entity — including the two
+coincident contact-pole vertices, which must resolve to DIFFERENT nodes (one per
+body). Formerly xfail; now passes.
 """
 import json
 
-import pytest
+import gmsh
 
-from helpers import cadmodeldata, dist, picker_vertex_coords
+from helpers import dist
 from mesher import create_mesh, save_mesh_meshdata_json
+from mesher.resolver import EntityResolutionError
+
+POLE = (0.0, 0.0, -10.0)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Geometric Entity Identification not yet implemented (P3): picker "
-           "V# != gmsh tag on assemblies. See "
-           "docs/plans/Geometric-Entity-Identification/.",
-)
-def test_picked_vertex_owner_lands_on_picked_vertex(fixtures, tmp_path):
+def test_owner_containers_resolve_to_correct_entities(fixtures, tmp_path):
     model = fixtures["hertz"]["model"]
-    md = cadmodeldata(model)
-
-    # The block's contact-pole vertex at (0,0,-10). Both bodies have a vertex
-    # there; the block's is the higher picker index (sphere pole is lower).
-    target = (0.0, 0.0, -10.0)
-    at_target = [pid for pid, c in picker_vertex_coords(md).items()
-                 if dist(c, target) < 1e-6]
-    assert at_target, "expected a picked vertex at the contact pole"
-    picked_pid = max(at_target, key=lambda s: int(s[1:]))  # block's vertex
-
     mesher, _ = create_mesh(model, "tet4", 8.0, model_name="hertz")
-    out = str(tmp_path / "hertz.json")
     try:
-        save_mesh_meshdata_json(
-            mesher, out, entity_owners={picked_pid: "block-contact"})
+        r = mesher._resolver
+        # Identify the two volumes: the block owns the bottom corner (0,0,-40).
+        block_vol = sphere_vol = None
+        for _, v in gmsh.model.getEntities(3):
+            try:
+                r.resolve_vertex((0.0, 0.0, -40.0), volume=v)
+                block_vol = v
+            except EntityResolutionError:
+                sphere_vol = v
+        assert block_vol and sphere_vol and block_vol != sphere_vol
+
+        selections = [
+            ({"kind": "vertex", "at": POLE, "volume": block_vol},
+             "block-contact"),
+            ({"kind": "vertex", "at": POLE, "volume": sphere_vol},
+             "sphere-contact"),
+            ({"kind": "face", "centroid": (15.0, 15.0, -40.0), "area": 900.0},
+             "fixed-bottom"),
+        ]
+        out = str(tmp_path / "hertz.json")
+        save_mesh_meshdata_json(mesher, out, selections=selections)
     finally:
         mesher.finalize()
 
     data = json.load(open(out))
     nodes = {n["id"]: tuple(n["location"]) for n in data["nodes"]}
-    containers = [c for c in data["meshEntityContainers"]
-                  if c["owner"] == "block-contact"]
-    assert containers, "no container emitted for the picked block vertex"
-    node_locs = [nodes[i] for i in containers[0]["nodeIds"]]
+    conts = {c["owner"]: c for c in data["meshEntityContainers"]}
 
-    # Correct behavior: the owner container's node is AT the picked vertex.
-    assert any(dist(loc, target) < 1e-6 for loc in node_locs), (
-        f"container node(s) {node_locs} are not at the picked vertex {target} "
-        f"(today they land on the wrong gmsh vertex — the bug)")
+    # Both contact-pole owners exist; each container's node sits AT the pole, but
+    # they are DIFFERENT nodes (one per body) — the coincident-vertex
+    # disambiguation that the picker-V# path got wrong.
+    bc = conts["block-contact"]["nodeIds"]
+    sc = conts["sphere-contact"]["nodeIds"]
+    assert bc and sc and set(bc).isdisjoint(sc)
+    for nid in bc + sc:
+        assert dist(nodes[nid], POLE) < 1e-6
+
+    # The face owner attaches to the block's bottom face (all nodes at z=-40).
+    fb = conts["fixed-bottom"]["nodeIds"]
+    assert fb and all(abs(nodes[n][2] + 40.0) < 1e-6 for n in fb)
