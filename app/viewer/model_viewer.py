@@ -448,6 +448,47 @@ def create_polydatas_per_part(
     return parts
 
 
+def anchor_for_pick(data: Dict[str, Any], pid: str):
+    """Geometric anchor for a picked entity PID, for the geometric resolver.
+
+    Bridges the GUI picker (which returns ``F#``/``V#`` PIDs) to the
+    source-agnostic resolver: returns a ``{'kind': ..., ...}`` anchor built from
+    the picked entity's geometry (vertex coordinate + owning part; face
+    area-weighted centroid + area + a few facet samples), so identity rides on
+    geometry, not on the PID. Returns ``None`` if the PID is not found.
+    """
+    for part_index, (_label, pd) in enumerate(
+            create_polydatas_per_part(data, with_face_index=True)):
+        fd = pd.field_data
+        if pid.startswith("V") and "vertex_pids" in fd:
+            pids = [str(v) for v in fd["vertex_pids"]]
+            if pid in pids:
+                p = np.asarray(fd["vertex_points"]).reshape(-1, 3)[
+                    pids.index(pid)]
+                return {"kind": "vertex", "at": tuple(float(c) for c in p),
+                        "part": part_index}
+        if pid.startswith("F") and "face_pids" in fd:
+            fpids = [str(v) for v in fd["face_pids"]]
+            if pid in fpids:
+                mask = np.asarray(pd.cell_data["face_index"]) == fpids.index(pid)
+                centers = pd.cell_centers().points[mask]
+                areas = pd.compute_cell_sizes(
+                    length=False, area=True, volume=False).cell_data["Area"][mask]
+                total = float(areas.sum())
+                if total <= 0:
+                    return None
+                centroid = (centers * areas[:, None]).sum(axis=0) / total
+                step = max(1, len(centers) // 4)
+                return {
+                    "kind": "face",
+                    "centroid": tuple(float(c) for c in centroid),
+                    "area": total,
+                    "facet_samples": [tuple(float(c) for c in s)
+                                      for s in centers[::step][:4]],
+                }
+    return None
+
+
 # ── Display constants ────────────────────────────────────────────────────────
 
 DEFAULT_COLOR = '#667eea'

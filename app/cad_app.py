@@ -34,7 +34,9 @@ from dialogs import (
 )
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
-from viewer.model_viewer import enumerate_part_labels, create_polydatas_per_part
+from viewer.model_viewer import (
+    enumerate_part_labels, create_polydatas_per_part, anchor_for_pick,
+)
 
 from models.parts import get_all_parts
 from models.assemblies import get_all_assemblies
@@ -649,8 +651,19 @@ class CadQueryApp(Gtk.Window):
                 )
                 self.status_label.set_text("Error: no cap face for extrusion")
                 return
+            cap_anchor = self._face_anchor(ex['cap_face'])
+            if cap_anchor is None:
+                self._show_error(
+                    "Mesh Error",
+                    "Could not resolve the picked cap face on the current "
+                    "model."
+                )
+                self.status_label.set_text("Error: cap face unresolved")
+                return
             extrusion = ExtrusionSpec(
-                cap_face=ex['cap_face'], num_layers=ex['num_layers'])
+                cap_face_at=cap_anchor['centroid'],
+                cap_face_area=cap_anchor.get('area'),
+                num_layers=ex['num_layers'])
 
         # Build refinement specs from the region table. Each region anchors on a
         # picked vertex resolved to its world COORDINATE (and 0-based part index
@@ -755,12 +768,15 @@ class CadQueryApp(Gtk.Window):
 
         filename, fmt = result
 
-        entity_owners = self._build_entity_owners(builder) if fmt == "meshdata_json" else None
+        if fmt == "meshdata_json":
+            selections, entity_owners = self._build_owner_inputs(builder)
+        else:
+            selections, entity_owners = None, None
         try:
             if fmt == "meshdata_json":
                 save_mesh_meshdata_json(
                     self._current_mesh, filename, owner=model_name,
-                    entity_owners=entity_owners,
+                    entity_owners=entity_owners, selections=selections,
                 )
             elif fmt == "json":
                 save_mesh_json(self._current_mesh, filename, title=model_name)
@@ -773,42 +789,40 @@ class CadQueryApp(Gtk.Window):
 
         self.status_label.set_text(f"Mesh saved to {Path(filename).name}")
 
-    def _build_entity_owners(self, builder) -> Optional[dict]:
-        """Assemble the entity_owners dict passed to MeshData JSON save.
+    def _face_anchor(self, pid):
+        """Geometric anchor for a picked face PID (or None)."""
+        model_data = self._current_model_data()
+        return anchor_for_pick(model_data, pid) if model_data else None
 
-        Picked-face ``Fn`` entries come from the model viewer's picker;
-        ``Pn`` entries are auto-filled from the current model's part
-        labels (same DFS order used by ``create_polydatas_per_part``) so
-        per-part MeshFragments come out named without the user having to
-        author a YAML config. Returns ``None`` when nothing to attach.
+    def _build_owner_inputs(self, builder):
+        """Return ``(selections, entity_owners)`` for MeshData JSON save.
+
+        Picked faces/vertices become GEOMETRIC selections resolved by the
+        mesher's geometric resolver (correct across STEP sources, unlike the
+        old F#/V#==gmsh-tag-1 assumption). Per-part ``P{i}`` fragment owners
+        stay as legacy entity_owners — part order is preserved, so they are
+        safe. Returns ``(None, None)`` when nothing to attach.
         """
-        owners: dict = {}
-        if self._picked_faces:
-            owners.update(self._picked_faces)
-        if self._picked_vertices:
-            owners.update(self._picked_vertices)
+        if builder is None:
+            return None, None
+        model_data = self._current_model_data()
+        if model_data is None:
+            return None, None
 
-        if builder is not None:
-            model = builder.get_current_model()
-            try:
-                if isinstance(model, cq.Assembly):
-                    model_data = assembly_to_modeldata(model)
-                else:
-                    model_data = part_to_modeldata(
-                        model,
-                        name=builder.get_selected_model_name() or "model",
-                        parameters=builder.get_current_build_params(),
-                        param_signature=builder.get_current_build_signature(),
-                    )
-                labels = enumerate_part_labels(model_data.to_dict())
-            except Exception:
-                # If label enumeration fails, fall through with what we have
-                # (the mesher will apply "part_{n+1}" defaults per volume).
-                labels = []
-            for i, label in enumerate(labels):
-                owners.setdefault(f"P{i}", label)
+        selections = []
+        for pid, label in (self._picked_faces + self._picked_vertices):
+            anchor = anchor_for_pick(model_data, pid)
+            if anchor is not None:
+                selections.append((anchor, label))
 
-        return owners or None
+        entity_owners: dict = {}
+        try:
+            for i, label in enumerate(enumerate_part_labels(model_data)):
+                entity_owners.setdefault(f"P{i}", label)
+        except Exception:
+            pass
+
+        return (selections or None), (entity_owners or None)
 
     def _on_menu_show_stats(self, menuitem) -> None:
         """Handle Mesh > Show Stats menu activation"""
