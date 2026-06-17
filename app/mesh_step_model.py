@@ -135,8 +135,6 @@ def _print_manifest(entities):
                     f"at [{cx:.4g}, {cy:.4g}, {cz:.4g}]")
             if dim in _DIM_MEASURE:
                 line += f"  {_DIM_MEASURE[dim]}={e['meas']:.4g}"
-            if e.get("name"):
-                line += f"  name={e['name']!r}"
             print(line)
 
 
@@ -157,8 +155,9 @@ def main():
     )
     parser.add_argument(
         "--list-entities", action="store_true",
-        help="Print the model's entity manifest (geometry per vertex/edge/face/"
-             "part, for authoring geometric references) and exit.",
+        help="Print the model's entity manifest (vertex/edge/face/part with "
+             "centroid and measure) for authoring geometric references, and "
+             "exit.",
     )
     args = parser.parse_args()
 

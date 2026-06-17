@@ -68,8 +68,15 @@ class GeometricResolver:
         return out
 
     def describe_entities(self):
-        """Manifest: every entity's dim/tag/centroid/bbox/measure/name."""
-        return [dict(dim=d, **e) for d in range(4) for e in self._index[d]]
+        """Manifest: every entity's dim/tag/centroid/measure/bbox.
+
+        No name field: gmsh's STEP importer does not surface per-entity STEP
+        names (only an OCC shape-tree label such as "Shapes/SOLID"), so a "name"
+        here would be misleading. Real STEP entity names would need an XDE/CAF
+        import path.
+        """
+        return [dict(dim=d, tag=e["tag"], com=e["com"], meas=e["meas"],
+                     bbox=e["bbox"]) for d in range(4) for e in self._index[d]]
 
     # ---------- resolution ----------
     def resolve_vertex(self, xyz, volume=None):
