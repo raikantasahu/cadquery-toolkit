@@ -16,13 +16,15 @@ Example config (mesh_config.yaml):
       elementType: tet4             # tet4, tet10, hex8, hex20, hex27
       elementSize: 5.0
       relativeSagTolerance: 0.01    # optional; max sag/radius on curved faces
-      # Optional local refinement around picked vertices (tet/recombined-hex).
-      localRefinement:              # refine only the vertex's own part
-        vertex: V7
+      # Optional local refinement around a point (tet/recombined-hex).
+      # Anchored by coordinate (portable across the CAD->gmsh boundary).
+      localRefinement:              # refine only one part near the point
+        at: [0, 0, -10]
         fineSize: 0.1
         radius: 2.0
-      contactRefinement:            # refine all parts meeting at the vertex
-        vertex: V12
+        part: 0                     # optional: 0-based part to confine to
+      contactRefinement:            # refine all parts near the point
+        at: [0, 0, -10]
         fineSize: 0.05
         radius: 1.0
 
@@ -59,7 +61,9 @@ def _parse_refinements(mesh_cfg, parser):
     """Build RefinementSpec list from mesh.localRefinement / contactRefinement.
 
     Each key may hold one entry (a dict) or several (a list of dicts). Every
-    entry needs ``vertex`` (e.g. V7) plus positive ``fineSize`` and ``radius``.
+    entry needs ``at: [x, y, z]`` plus positive ``fineSize`` and ``radius``.
+    ``localRefinement`` may add ``part`` (0-based volume index) to disambiguate
+    a coordinate shared by several parts.
     """
     specs = []
     for key, scope in (("localRefinement", "local"),
@@ -71,21 +75,28 @@ def _parse_refinements(mesh_cfg, parser):
         for entry in entries:
             if not isinstance(entry, dict):
                 parser.error(f"mesh.{key} must be a mapping (or list of them)")
-            vertex = entry.get("vertex")
-            if not vertex:
-                parser.error(f"mesh.{key} requires 'vertex' (e.g. V7)")
+            at = entry.get("at")
+            if not (isinstance(at, (list, tuple)) and len(at) == 3):
+                parser.error(f"mesh.{key} requires 'at: [x, y, z]'")
             try:
+                at = tuple(float(v) for v in at)
                 fine_size = float(entry["fineSize"])
                 radius = float(entry["radius"])
             except (KeyError, TypeError, ValueError):
                 parser.error(
-                    f"mesh.{key} requires numeric 'fineSize' and 'radius'")
+                    f"mesh.{key} requires numeric 'at', 'fineSize', 'radius'")
             if fine_size <= 0 or radius <= 0:
                 parser.error(
                     f"mesh.{key}: 'fineSize' and 'radius' must be positive")
+            part = entry.get("part")
+            if part is not None:
+                try:
+                    part = int(part)
+                except (TypeError, ValueError):
+                    parser.error(f"mesh.{key}: 'part' must be an integer index")
             specs.append(RefinementSpec(
-                vertex=str(vertex), fine_size=fine_size, radius=radius,
-                scope=scope))
+                at=at, fine_size=fine_size, radius=radius, scope=scope,
+                part_index=part))
     return specs
 
 

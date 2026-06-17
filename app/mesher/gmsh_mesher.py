@@ -187,33 +187,39 @@ class ExtrusionSpec:
 
 @dataclass
 class RefinementSpec:
-    """Local mesh refinement around a picked vertex, for the tet/recombine path.
+    """Local mesh refinement around an anchor coordinate (tet/recombine path).
 
-    The element size ramps from ``fine_size`` at the vertex up to the global
-    ``element_size`` by ``radius`` away (a gmsh Distance+Threshold field). The
-    UI anchor is always a single vertex; ``scope`` decides which parts it acts
-    on:
+    Anchored by COORDINATE, not by a vertex id. An assembly's vertex picker
+    numbers vertices in CAD traversal order, which does NOT match gmsh's import
+    order, so an id is not a portable anchor across the two — a coordinate is.
+    The UI still picks a vertex; its world location becomes ``at``.
 
-        scope="local"   : refine ONLY the part (volume) that owns the vertex.
-                          The field is wrapped in a gmsh Restrict field bound to
-                          that volume, so other parts keep the global size.
-        scope="contact" : refine EVERY part in the vicinity of the vertex. The
-                          vertex location is shared by one vertex per touching
-                          body (e.g. a contact point); the field is anchored on
-                          all model points coincident with the picked one and is
-                          applied globally, so each touching part is refined.
+    The element size ramps from ``fine_size`` at ``at`` up to the global
+    ``element_size`` by ``radius`` away (a gmsh Distance+Threshold field).
+    ``scope`` decides which parts it acts on:
+
+        scope="local"   : refine ONLY one part. ``part_index`` (0-based, in gmsh
+                          volume order = assembly order) selects it; if None,
+                          the part owning the nearest model vertex is used. The
+                          field is wrapped in a gmsh Restrict bound to that
+                          volume so other parts keep the global size.
+        scope="contact" : refine EVERY part near ``at`` — anchored on all model
+                          points at that location (one per touching body, e.g.
+                          a contact point) and applied globally.
 
     Fields:
-        vertex:    vertex PersistentID ("V{n}", gmsh point tag ``n + 1``).
-        fine_size: element size at the vertex (Threshold SizeMin).
-        radius:    distance over which size relaxes back to ``element_size``
-                   (Threshold DistMax / SizeMax).
-        scope:     "local" or "contact".
+        at:         (x, y, z) anchor coordinate (world space).
+        fine_size:  element size at the anchor (Threshold SizeMin).
+        radius:     distance over which size relaxes back to ``element_size``
+                    (Threshold DistMax / SizeMax).
+        scope:      "local" or "contact".
+        part_index: 0-based volume to confine local refinement to (optional).
     """
-    vertex: str
+    at: tuple
     fine_size: float
     radius: float
     scope: str = "contact"
+    part_index: Optional[int] = None
 
 
 # Topology for an extrusion, resolved from the cap face on the original solid.
@@ -1024,22 +1030,42 @@ class GmshMesher:
         """Build one refinement field from a ``RefinementSpec``; return its tag.
 
         Distance (from the anchor point set) -> Threshold (graded size), and for
-        ``scope="local"`` a Restrict that confines it to the vertex's volume.
+        ``scope="local"`` a Restrict that confines it to one part's volume.
         """
-        ptag = self._point_tag_for_pid(spec.vertex)
-        if spec.scope == "local":
-            points = [ptag]
-        elif spec.scope == "contact":
-            # Anchor on every model point coincident with the picked vertex —
-            # one per body meeting at the contact — so all touching parts refine.
-            points = self._coincident_points(ptag)
+        if spec.fine_size <= 0 or spec.radius <= 0:
+            raise MeshValidationError(
+                "refinement fine_size and radius must be positive.")
+        near = self._points_near(spec.at)
+        if not near:
+            raise MeshValidationError(
+                f"refinement anchor {tuple(spec.at)} matches no model vertex.")
+
+        target_vol = None
+        if spec.scope == "contact":
+            # Every point at the anchor (one per body meeting there) so all
+            # touching parts refine from a single picked vertex.
+            points = near
+        elif spec.scope == "local":
+            if spec.part_index is not None:
+                vols = gmsh.model.getEntities(3)
+                if not 0 <= spec.part_index < len(vols):
+                    raise MeshValidationError(
+                        f"refinement part_index {spec.part_index} out of range "
+                        f"(0..{len(vols) - 1}).")
+                target_vol = vols[spec.part_index][1]
+                points = [p for p in near
+                          if self._volume_of_point(p) == target_vol]
+                if not points:
+                    raise MeshValidationError(
+                        f"refinement anchor {tuple(spec.at)} has no vertex on "
+                        f"part {spec.part_index}.")
+            else:
+                points = near[:1]
+                target_vol = self._volume_of_point(points[0])
         else:
             raise MeshValidationError(
                 f"refinement scope must be 'local' or 'contact', "
                 f"got {spec.scope!r}.")
-        if spec.fine_size <= 0 or spec.radius <= 0:
-            raise MeshValidationError(
-                "refinement fine_size and radius must be positive.")
 
         fd = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(fd, "PointsList", points)
@@ -1052,46 +1078,31 @@ class GmshMesher:
         if spec.scope != "local":
             return ft
 
-        vol = self._volume_of_point(ptag)
-        if vol is None:
+        if target_vol is None:
             raise MeshValidationError(
-                f"local refinement vertex {spec.vertex!r} is not on any part "
+                f"local refinement anchor {tuple(spec.at)} is not on any part "
                 f"(volume).")
         fr = gmsh.model.mesh.field.add("Restrict")
         gmsh.model.mesh.field.setNumber(fr, "InField", ft)
-        gmsh.model.mesh.field.setNumbers(fr, "VolumesList", [vol])
+        gmsh.model.mesh.field.setNumbers(fr, "VolumesList", [target_vol])
         return fr
 
-    def _point_tag_for_pid(self, pid: str) -> int:
-        """Map a vertex PersistentID ('V{n}') to its gmsh point tag (n+1)."""
-        if not (isinstance(pid, str) and pid[:1].upper() == "V"
-                and pid[1:].isdigit()):
-            raise MeshValidationError(
-                f"refinement vertex must be a vertex PersistentID like 'V7', "
-                f"got {pid!r}.")
-        tag = int(pid[1:]) + 1
-        if (0, tag) not in gmsh.model.getEntities(0):
-            raise MeshValidationError(
-                f"refinement vertex {pid!r} (point tag {tag}) not found in "
-                f"geometry.")
-        return tag
-
     @staticmethod
-    def _coincident_points(ptag: int) -> List[int]:
-        """All model point tags coincident (within tolerance) with ``ptag``.
+    def _points_near(xyz) -> List[int]:
+        """All model point tags within tolerance of coordinate ``xyz``.
 
-        In an assembly each touching body has its own vertex at a shared
-        location; this returns the whole coincident set so a contact field can
-        refine every part there from a single picked vertex.
+        Anchoring by coordinate is namespace-independent: it sidesteps the
+        mismatch between the CAD vertex picker's ordering and gmsh's import
+        ordering, and naturally returns the whole coincident set at a shared
+        location (one vertex per touching body).
         """
-        target = gmsh.model.getValue(0, ptag, [])
         bb = gmsh.model.getBoundingBox(-1, -1)
         diag = math.sqrt(sum((bb[i + 3] - bb[i]) ** 2 for i in range(3)))
         tol = max(1e-9, diag * 1e-6)
         out = []
         for _, t in gmsh.model.getEntities(0):
             c = gmsh.model.getValue(0, t, [])
-            if math.sqrt(sum((c[i] - target[i]) ** 2 for i in range(3))) <= tol:
+            if math.sqrt(sum((c[i] - xyz[i]) ** 2 for i in range(3))) <= tol:
                 out.append(t)
         return out
 
