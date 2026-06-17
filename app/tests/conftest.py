@@ -42,6 +42,19 @@ def _build_models():
     }
 
 
+# Foreign-source STEP fixtures vendored into the repo (a subset of the NIST PMI
+# set, original directory structure preserved) so the suite is self-contained.
+NIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+
+
+@pytest.fixture(scope="session")
+def nist_dir():
+    """Path to the vendored NIST PMI STEP fixtures; skip if absent."""
+    if not os.path.isdir(NIST_DIR):
+        pytest.skip("vendored NIST STEP fixtures not present")
+    return NIST_DIR
+
+
 @pytest.fixture(scope="session")
 def fixtures(tmp_path_factory):
     """{name: {'model': cq object, 'step': exported STEP path}} built once."""

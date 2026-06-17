@@ -3,12 +3,47 @@
 The oracle is geometric and computed directly from gmsh / CADModelData — it
 never trusts entity tags/PIDs, which are the thing under test.
 """
+import contextlib
+
 import cadquery as cq
 import gmsh
 import numpy as np
 
 from converter import assembly_to_modeldata, part_to_modeldata
 from viewer.model_viewer import create_polydatas_per_part
+
+
+@contextlib.contextmanager
+def gmsh_session(step_path):
+    """Import ``step_path`` into a fresh gmsh model; finalize on exit."""
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("session")
+    try:
+        gmsh.merge(step_path)
+        gmsh.model.occ.synchronize()
+        yield
+    finally:
+        gmsh.finalize()
+
+
+def edge_samples(tag, n=5):
+    """``n`` world points along curve ``tag`` (endpoints + interior)."""
+    lo, hi = gmsh.model.getParametrizationBounds(1, tag)
+    ts = [lo[0] + (hi[0] - lo[0]) * i / (n - 1) for i in range(n)]
+    return [tuple(gmsh.model.getValue(1, tag, [t])) for t in ts]
+
+
+def face_samples(tag, n=3):
+    """A small grid of world points on surface ``tag``."""
+    lo, hi = gmsh.model.getParametrizationBounds(2, tag)
+    pts = []
+    for i in range(n):
+        for j in range(n):
+            u = lo[0] + (hi[0] - lo[0]) * (i + 1) / (n + 1)
+            v = lo[1] + (hi[1] - lo[1]) * (j + 1) / (n + 1)
+            pts.append(tuple(gmsh.model.getValue(2, tag, [u, v])))
+    return pts
 
 
 def dist(a, b):

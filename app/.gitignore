@@ -100,6 +100,10 @@ dmypy.json
 *.igs
 *.msh
 
+# Vendored test fixtures (foreign-source STEP) are tracked despite the rules
+# above, so the test suite is self-contained.
+!tests/models/**
+
 # Generated JSON model files (keep sample_model.json)
 !sample_model.json
 model_render.png
