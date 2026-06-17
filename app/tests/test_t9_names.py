@@ -1,8 +1,9 @@
-"""T9 — names are an optional aid, never required or trusted (Feature R9).
+"""T9 — names are not relied on; resolution is geometry only (Feature R9).
 
-NIST AP242 files populate entity names, but non-discriminatingly (every face is
-"Shapes/SOLID"). Passing that name must not break or mislead resolution — it is
-area-validated, fails (it maps to all faces), and geometry decides.
+gmsh does not surface usable per-entity STEP names (only a non-discriminating
+shape label), so the resolver ignores names entirely: the manifest carries no
+name, and every entity of a file whose STEP entities DO carry names resolves
+purely by geometry.
 """
 import os
 
@@ -12,18 +13,15 @@ from helpers import gmsh_session
 from mesher.resolver import GeometricResolver
 
 
-def test_nondiscriminating_name_does_not_mislead(nist_dir):
+def test_resolution_is_geometry_only(nist_dir):
     step = os.path.join(nist_dir, "nist_ctc_01_asme1_ap242-e1.stp")
     with gmsh_session(step):
         r = GeometricResolver()
-        # confirm the names really are non-discriminating
-        names = {e["name"] for e in r._index[2] if e["name"]}
-        assert names, "expected populated (if non-discriminating) names"
-
+        # the manifest exposes no name field at all
+        assert all("name" not in e for e in r.describe_entities())
+        # every face resolves by geometry alone (no name input exists)
         for _, t in gmsh.model.getEntities(2):
             com = gmsh.model.occ.getCenterOfMass(2, t)
             area = gmsh.model.occ.getMass(2, t)
-            name = gmsh.model.getEntityName(2, t)  # e.g. "Shapes/SOLID"
-            # passing the useless name must still resolve correctly by geometry
-            assert t in r.resolve_face(com, area=area, name=name), \
-                f"face {t} mis-resolved when given non-discriminating name {name!r}"
+            assert t in r.resolve_face(com, area=area), \
+                f"face {t} did not resolve by geometry"

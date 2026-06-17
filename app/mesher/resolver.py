@@ -52,7 +52,6 @@ class GeometricResolver:
                     "com": tuple(float(c) for c in com),
                     "meas": float(meas),
                     "bbox": gmsh.model.getBoundingBox(d, t),
-                    "name": gmsh.model.getEntityName(d, t),
                 })
         return index
 
@@ -90,7 +89,7 @@ class GeometricResolver:
                 + (f" on volume {volume}" if volume is not None else ""))
         return sorted(matches)
 
-    def resolve_edge(self, samples, name=None):
+    def resolve_edge(self, samples):
         tol = self._sample_tol(samples)
         sbox = self._expanded_box(samples, tol)
         cand = [e for e in self._index[1]
@@ -113,18 +112,13 @@ class GeometricResolver:
         return sorted(out)
 
     def resolve_face(self, centroid, area=None, edge_anchors=None,
-                     facet_samples=None, name=None):
-        # (a) name, but only if area-validated (names are non-discriminating).
-        if name:
-            named = [e["tag"] for e in self._index[2] if e["name"] == name]
-            if named and self._meas_ok(2, named, area):
-                return sorted(named)
-        # (b) the surface(s) common to the face's resolved boundary edges.
+                     facet_samples=None):
+        # (a) the surface(s) common to the face's resolved boundary edges.
         if edge_anchors:
             common = self._faces_from_edges(edge_anchors)
             if common and self._meas_ok(2, common, area):
                 return sorted(common)
-        # (c) centroid (+ area, + facet samples).
+        # (b) centroid (+ area, + facet samples).
         tol = self._tol_for(centroid)
         cands = [e["tag"] for e in self._index[2]
                  if _dist(e["com"], centroid) <= tol
