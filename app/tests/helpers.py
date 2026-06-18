@@ -57,13 +57,39 @@ def cadmodeldata(model):
     return md.to_dict()
 
 
+def _part_counts(m):
+    return (len(m.get("vertexList") or []), len(m.get("edgeList") or []),
+            len(m.get("faceList") or []))
+
+
 def cad_counts(md):
-    """(vertices, edges, faces) summed across all models in the envelope."""
+    """(vertices, edges, faces) over INSTANCES, to match gmsh's flattened solids.
+
+    CADModelData dedups identical part *definitions* (a part placed N times is
+    stored once and referenced by N ``childComponents`` with per-instance
+    transforms — product-structure instancing). gmsh, importing the flattened
+    STEP, sees N solids. So count per instance: each childComponent contributes
+    its referenced part's entities. A single part (no childComponents) sums its
+    own model(s).
+    """
+    models = md["models"]
+    root = models[md.get("rootIndex", 0)]
+    comps = root.get("childComponents") or []
+    if comps:
+        v = e = f = 0
+        for c in comps:
+            idx = c.get("childIndex", c.get("childModelIndex"))
+            pv, pe, pf = _part_counts(models[idx])
+            v += pv
+            e += pe
+            f += pf
+        return (v, e, f)
     v = e = f = 0
-    for m in md["models"]:
-        v += len(m.get("vertexList") or [])
-        e += len(m.get("edgeList") or [])
-        f += len(m.get("faceList") or [])
+    for m in models:
+        pv, pe, pf = _part_counts(m)
+        v += pv
+        e += pe
+        f += pf
     return (v, e, f)
 
 

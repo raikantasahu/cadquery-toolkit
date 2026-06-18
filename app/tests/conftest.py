@@ -29,9 +29,12 @@ def _two_cubes():
     return a
 
 
-# Fixtures whose CAD topology gmsh preserves 1:1 (verified 2026-06-17). The
-# bolted/interpenetrating case is intentionally NOT here — it violates 1:1 and
-# is a P1 concern.
+# Fixtures whose CAD topology gmsh preserves 1:1 per instance (verified
+# 2026-06-17). `bolted` exercises part *instancing*: the same plate object is
+# placed twice (bottom/top), so CADModelData stores one plate definition but two
+# childComponents; gmsh's flattened STEP has two plate solids. Counted per
+# instance (cad_counts expands childComponents) it is 1:1 — earlier thought to
+# "violate 1:1 via interpenetration", which was a counting error, not splitting.
 def _build_models():
     return {
         "hertz": get_assembly_function(
@@ -39,6 +42,7 @@ def _build_models():
         "hemisphere": get_part_function("hemisphere_sector")(
             radius=10.0, sweep_angle=360.0),
         "twocubes": _two_cubes(),
+        "bolted": get_assembly_function("bolted_single_lap_joint")(),
     }
 
 
