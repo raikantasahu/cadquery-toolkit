@@ -19,6 +19,8 @@ from gi.repository import Gtk, GObject, Pango
 import inspect
 from typing import get_origin, get_args, Union, Optional, Callable, Dict, Any
 
+from widgets._helpers import make_view_model_button
+
 
 class ModelBuilder(Gtk.Box):
     """
@@ -144,12 +146,8 @@ class ModelBuilder(Gtk.Box):
         button_box.set_halign(Gtk.Align.CENTER)
         button_box.set_margin_top(10)
 
-        # View Model button
-        self.view_button = Gtk.Button(label="View Model")
-        self.view_button.get_style_context().add_class("suggested-action")
-        self.view_button.connect("clicked", self._on_view_clicked)
-        self.view_button.set_sensitive(False)
-        self.view_button.set_size_request(150, -1)
+        # View Model button (shared factory — see StepImportPanel)
+        self.view_button = make_view_model_button(self._on_view_clicked)
         button_box.pack_start(self.view_button, False, False, 0)
 
         # Clear button

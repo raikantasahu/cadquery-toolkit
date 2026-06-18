@@ -18,6 +18,7 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GObject
 
 from importer import step_importer
+from widgets._helpers import make_view_model_button
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +64,8 @@ class StepImportPanel(Gtk.Box):
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         button_box.set_halign(Gtk.Align.CENTER)
         button_box.set_margin_top(10)
-        self._view_btn = Gtk.Button(label="View Model")
-        self._view_btn.get_style_context().add_class("suggested-action")
-        self._view_btn.set_sensitive(False)
-        self._view_btn.set_size_request(150, -1)
-        self._view_btn.connect('clicked', lambda _b: self.request_view())
+        self._view_btn = make_view_model_button(
+            lambda _b: self.request_view())
         button_box.pack_start(self._view_btn, False, False, 0)
         self.pack_start(button_box, False, False, 0)
 
