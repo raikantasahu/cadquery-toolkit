@@ -1,11 +1,18 @@
 """
-cad_app.py - CadQuery Model Studio
+app_gtk.py - CadQuery Model Studio (GTK shell)
 
-Main application combining model creation and 3D viewing.
+Thin GTK wrapper over the GTK-free app_core.AppCore: window, widgets, 3D picking,
+dialogs, and menu handlers that translate UI <-> core. Domain logic lives in the
+core (see docs/plans/Core-UI-Separation.md).
 
 Usage:
-    python cad_app.py
+    python app_gtk.py
 """
+# Lazy annotations (PEP 563): method signatures reference names from the guarded
+# import block below (e.g. ModelBuilder); without this they'd be evaluated at
+# class-definition time and a missing dependency would crash the module before
+# main() can show the friendly dialog (T1.3).
+from __future__ import annotations
 
 import os
 os.environ['NO_AT_BRIDGE'] = '1'
@@ -14,27 +21,31 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, Pango
 
-import cadquery as cq
-
 from pathlib import Path
 from typing import Optional
 
-from converter import (
-    HAS_CADQUERY, HAS_FREECAD,
-    part_to_modeldata, assembly_to_modeldata,
-)
-from mesher import HAS_GMSH
-from dialogs import (
-    ask_save_mesh_file, ask_export_file, ask_mesh_settings,
-    edit_face_selection, pick_entities,
-)
-from widgets import ModelBuilder
-from viewer import ModelViewer, show_mesh
+# Dependency-sensitive imports are guarded as one block (Architecture-Review
+# T1.3): this GTK shell is the only module that imports gi, and a missing
+# dependency (cadquery/freecad/vtk/gmsh) on this chain would otherwise crash at
+# module load with a raw traceback before main() can show a friendly dialog.
+try:
+    import cadquery as cq
 
-from models.parts import get_all_parts
-from models.assemblies import get_all_assemblies
+    from converter import HAS_FREECAD, part_to_modeldata, assembly_to_modeldata
+    from mesher import HAS_GMSH
+    from dialogs import (
+        ask_save_mesh_file, ask_export_file, ask_mesh_settings,
+        edit_face_selection, pick_entities,
+    )
+    from widgets import ModelBuilder
+    from viewer import ModelViewer, show_mesh
+    from models.parts import get_all_parts
+    from models.assemblies import get_all_assemblies
+    from app_core import AppCore
 
-from app_core import AppCore
+    _IMPORT_ERROR = None
+except ImportError as _exc:
+    _IMPORT_ERROR = _exc
 
 
 class CadQueryApp(Gtk.Window):
@@ -71,10 +82,9 @@ class CadQueryApp(Gtk.Window):
         self._mesh_settings: dict = None
         self.connect("destroy", self._on_destroy)
 
-        # Check dependencies
-        if not HAS_CADQUERY:
-            self._show_dependency_error("CadQuery not installed.\nRun: conda install -c conda-forge cadquery")
-            return
+        # cadquery-missing is handled before the window is built (main() shows a
+        # dialog if the guarded imports failed). FreeCAD can be absent while
+        # cadquery imports, so check it here.
         if not HAS_FREECAD:
             self._show_dependency_error("FreeCAD not installed.\nRun: conda install -c conda-forge freecad")
             return
@@ -845,6 +855,25 @@ class CadQueryApp(Gtk.Window):
         dialog.destroy()
 
 
+def _show_import_error(exc: ImportError) -> None:
+    """Friendly dialog when a required dependency is missing (T1.3)."""
+    missing = getattr(exc, "name", None) or "a required module"
+    dialog = Gtk.MessageDialog(
+        transient_for=None, flags=0,
+        message_type=Gtk.MessageType.ERROR,
+        buttons=Gtk.ButtonsType.OK,
+        text="Missing Dependencies",
+    )
+    dialog.format_secondary_text(
+        f"Could not start: '{missing}' is not available.\n\n"
+        f"  {exc}\n\n"
+        "Install the project dependencies in the conda environment "
+        "(e.g. cadquery, freecad) and try again."
+    )
+    dialog.run()
+    dialog.destroy()
+
+
 def main():
     # Set environment for Mesa rendering if needed
     if 'DISPLAY' not in os.environ or not os.environ['DISPLAY']:
@@ -852,6 +881,15 @@ def main():
 
     os.environ.setdefault('__GLX_VENDOR_LIBRARY_NAME', 'mesa')
     os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE', '1')
+
+    # A dependency was missing at import (guarded block above): report it loudly
+    # to stderr (developers) and via a friendly dialog (users), then exit.
+    if _IMPORT_ERROR is not None:
+        import traceback
+        traceback.print_exception(type(_IMPORT_ERROR), _IMPORT_ERROR,
+                                  _IMPORT_ERROR.__traceback__)
+        _show_import_error(_IMPORT_ERROR)
+        return
 
     app = CadQueryApp()
     app.connect("destroy", Gtk.main_quit)

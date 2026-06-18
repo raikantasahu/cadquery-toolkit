@@ -2,7 +2,7 @@
 
 The GUI picker returns F#/V# PIDs; anchor_for_pick converts each to a geometric
 anchor, which the resolver maps to the correct mesh entity. This is the
-GTK-free core of the GUI adapter (cad_app is then a thin caller).
+GTK-free core of the GUI adapter (app_gtk is then a thin caller).
 """
 import gmsh
 
