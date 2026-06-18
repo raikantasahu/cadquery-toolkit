@@ -40,11 +40,9 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
     """
     initial = initial or {}
     refinements = refinements or []
-    dialog = Gtk.Dialog(title="Mesh Settings", transient_for=parent, modal=True)
-    dialog.add_buttons(
-        Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-        Gtk.STOCK_OK, Gtk.ResponseType.OK,
-    )
+    dialog = Gtk.Dialog(title="Create Mesh", transient_for=parent, modal=True)
+    dialog.add_button(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+    dialog.add_button("Create Mesh", Gtk.ResponseType.OK)
     dialog.set_default_response(Gtk.ResponseType.OK)
     dialog.set_default_size(480, 380)
 
@@ -54,6 +52,11 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
     content.set_margin_end(10)
     content.set_margin_top(8)
     content.set_margin_bottom(6)
+
+    heading = Gtk.Label()
+    heading.set_markup("<b>Mesh Settings</b>")
+    heading.set_halign(Gtk.Align.START)
+    content.pack_start(heading, False, False, 0)
 
     notebook = Gtk.Notebook()
     content.pack_start(notebook, True, True, 0)
