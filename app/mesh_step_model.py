@@ -39,16 +39,10 @@ import yaml
 
 from importer import step_importer
 from mesher.gmsh_mesher import (
-    GmshMesher, MeshType, MeshValidationError, ExtrusionSpec, RefinementSpec,
+    GmshMesher, MeshValidationError, ExtrusionSpec, RefinementSpec,
 )
-
-_MESH_TYPES = {
-    "tet4": MeshType.TET4,
-    "tet10": MeshType.TET10,
-    "hex8": MeshType.HEX8,
-    "hex20": MeshType.HEX20,
-    "hex27": MeshType.HEX27,
-}
+from mesher import MESH_TYPES
+from meshconfig import parse_mesh_basics
 
 _FORMAT_EXTENSIONS = {
     "xml": ".xml",
@@ -241,24 +235,10 @@ def main():
     output_cfg = config.get("output", {})
     entity_owners, owner_selections = _parse_owners(config.get("owners"), parser)
 
-    element_type_str = mesh_cfg.get("elementType", "tet4")
-    if element_type_str not in _MESH_TYPES:
-        parser.error(
-            f"unknown elementType '{element_type_str}' "
-            f"(expected one of: {', '.join(_MESH_TYPES)})"
-        )
-    mesh_type = _MESH_TYPES[element_type_str]
-    element_size = float(mesh_cfg.get("elementSize", 5.0))
+    element_type_str, element_size, relative_sag_tolerance = parse_mesh_basics(
+        mesh_cfg, parser.error)
+    mesh_type = MESH_TYPES[element_type_str]
     mesh_owner = mesh_cfg.get("owner")
-
-    relative_sag_tolerance = mesh_cfg.get("relativeSagTolerance")
-    if relative_sag_tolerance is not None:
-        relative_sag_tolerance = float(relative_sag_tolerance)
-        if relative_sag_tolerance <= 0:
-            parser.error(
-                f"relativeSagTolerance must be positive "
-                f"(got {relative_sag_tolerance})"
-            )
 
     # Compound extruded-hex config: cap face + through-thickness layers
     # always travel together. Its presence selects structured-hex meshing.

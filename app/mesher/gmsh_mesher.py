@@ -155,7 +155,7 @@ class MeshType(enum.Enum):
     HEX27 = "hex27"
 
 
-_MESH_TYPE_MAP = {
+MESH_TYPES = {
     "tet4": MeshType.TET4,
     "tet10": MeshType.TET10,
     "hex8": MeshType.HEX8,
@@ -252,7 +252,7 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model",
         Tuple of (GmshMesher, stats_dict). The mesher holds the generated
         mesh and must be consumed by save_mesh() or finalize().
     """
-    mesh_type = _MESH_TYPE_MAP[mesh_type_str]
+    mesh_type = MESH_TYPES[mesh_type_str]
     mesher = GmshMesher(model, model_name=model_name)
     stats = mesher.generate(mesh_type, element_size,
                             relative_sag_tolerance=relative_sag_tolerance,

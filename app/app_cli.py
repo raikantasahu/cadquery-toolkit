@@ -30,6 +30,7 @@ import sys
 import yaml
 
 from app_core import AppCore, AppError
+from meshconfig import parse_mesh_basics
 from model.tessellation import anchor_for_pick, create_polydatas_per_part
 
 _EXT = {"meshdata_json": ".json", "json": ".json", "msh": ".msh"}
@@ -57,8 +58,11 @@ def _parse_params(pairs, parser):
     return params
 
 
-def _mesh_config(mesh_cfg):
-    """Translate the YAML mesh block into the core's config dict."""
+def _mesh_config(mesh_cfg, error):
+    """Translate the YAML mesh block into the core's config dict. Basics
+    (type/size/sag) go through the shared parser; extrusion/refinements are
+    PID-based (registry-model specific)."""
+    element_type, element_size, sag = parse_mesh_basics(mesh_cfg, error)
     ex = mesh_cfg.get("extrusion")
     core_ex = None
     if ex:
@@ -70,9 +74,9 @@ def _mesh_config(mesh_cfg):
         for r in mesh_cfg.get("refinements", [])
     ]
     return {
-        "mesh_type": mesh_cfg.get("elementType", "tet4"),
-        "element_size": float(mesh_cfg.get("elementSize", 5.0)),
-        "relative_sag_tolerance": mesh_cfg.get("relativeSagTolerance"),
+        "mesh_type": element_type,
+        "element_size": element_size,
+        "relative_sag_tolerance": sag,
         "extrusion": core_ex,
         "refinements": refinements,
     }
@@ -144,8 +148,9 @@ def main(argv=None):
     out = args.output or (args.model + _EXT.get(output_format, ".msh"))
 
     _apply_owners(core, config.get("owners"), parser)
+    core_config = _mesh_config(config.get("mesh", {}), parser.error)
     try:
-        stats = core.mesh(_mesh_config(config.get("mesh", {})))
+        stats = core.mesh(core_config)
         core.save_mesh(out, output_format, model_name=args.model)
     except Exception as e:
         core.finalize()
