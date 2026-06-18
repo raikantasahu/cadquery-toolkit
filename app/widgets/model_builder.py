@@ -406,6 +406,14 @@ class ModelBuilder(Gtk.Box):
         """Get the currently selected model name"""
         return self.function_combo.get_active_text()
 
+    def has_model(self) -> bool:
+        """Whether this source currently offers a model (a selection exists).
+
+        Part of the duck-typed model-source surface the window relies on
+        (see app_gtk.active_source); StepImportPanel implements the same.
+        """
+        return self.get_selected_model_name() is not None
+
     def get_current_model(self):
         """Get the current built model (or None)"""
         return self.current_model

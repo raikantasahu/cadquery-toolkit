@@ -214,16 +214,17 @@ class CadQueryApp(Gtk.Window):
     # --- Active-builder helpers ---
 
     @property
-    def model_builder(self) -> Optional[ModelBuilder]:
-        """Return the active tab if it is a ``ModelBuilder``, else ``None``.
+    def active_source(self) -> Optional[ModelBuilder]:
+        """Return the active tab if it is a *model source*, else ``None``.
 
-        Answers the typed conditional question "is the active tab a model
-        builder, and if so, which?" — not the broader "which widget is the
-        active tab?" The notebook can in principle hold non-builder pages
-        (a future Settings tab, etc.); this property returns ``None`` for
-        those, and callers that operate on a builder either short-circuit
-        on ``None`` or are gated upstream by menu-item sensitivity (which
-        is itself ``False`` when no active builder is present).
+        A model source is any tab the window can drive uniformly to produce a
+        model — today ``ModelBuilder`` (Parts/Assemblies); ``StepImportPanel``
+        joins it later. It is a duck-typed contract (a shared method/signal
+        surface, not a base class — GObject metaclass; see
+        docs/plans/STEP-Import-GUI.md), so membership is tested by ``isinstance``
+        against the known source classes. Callers either short-circuit on
+        ``None`` or are gated by menu sensitivity (``False`` when no source has a
+        model).
         """
         page_num = self.notebook.get_current_page()
         if page_num < 0:
@@ -249,21 +250,15 @@ class CadQueryApp(Gtk.Window):
         """Tab switch invalidates any held mesh, re-syncs menu sensitivity,
         and restores the new tab's last builder status.
 
-        Reads the new builder from `page_num` rather than via the
-        `model_builder` property because GTK has not yet committed
+        Reads the new source from `page_num` rather than via the
+        `active_source` property because GTK has not yet committed
         `get_current_page()` at the time this signal fires.
         """
-        self._finalize_current_mesh()
-        self._picked_faces = []
-        self._picked_vertices = []
-        self._cap_face = None
-        self._refinements = []
-        self._mesh_settings = None
-        builder = notebook.get_nth_page(page_num)
-        self._sync_menu_sensitivity(builder=builder)
-        status = builder.last_status_message
+        source = notebook.get_nth_page(page_num)
+        self._invalidate_selections(source=source)
+        status = source.last_status_message
         if not status:
-            status = f"{notebook.get_tab_label_text(builder)} — no model selected"
+            status = f"{notebook.get_tab_label_text(source)} — no model selected"
         self.status_label.set_text(status)
 
     def _on_view_requested(self, builder, model) -> None:
@@ -320,7 +315,7 @@ class CadQueryApp(Gtk.Window):
 
     def _on_menu_view(self, menuitem) -> None:
         """Handle Model > View menu activation"""
-        builder = self.model_builder
+        builder = self.active_source
         if builder is None:
             return
         builder.request_view()
@@ -450,7 +445,7 @@ class CadQueryApp(Gtk.Window):
         The GTK side owns the builder (a widget); it hands the built model +
         params to the GTK-free core. Returns False if there's no model.
         """
-        builder = self.model_builder
+        builder = self.active_source
         if builder is None or not builder.build_model():
             return False
         model = builder.get_current_model()
@@ -508,7 +503,7 @@ class CadQueryApp(Gtk.Window):
 
     def _on_menu_export(self, menuitem) -> None:
         """Handle Model > Export menu activation"""
-        builder = self.model_builder
+        builder = self.active_source
         if builder is None:
             return
         if not self._sync_core_model():
@@ -630,7 +625,7 @@ class CadQueryApp(Gtk.Window):
         if not self._core.has_mesh():
             return
 
-        builder = self.model_builder
+        builder = self.active_source
         model_name = "model"
         if builder is not None:
             model_name = builder.get_selected_model_name() or model_name
@@ -717,27 +712,22 @@ class CadQueryApp(Gtk.Window):
     def _sync_menu_sensitivity(
         self,
         enabled: bool = True,
-        builder: Optional[ModelBuilder] = None,
+        source=None,
     ) -> None:
         """Update every menu item from current model and mesh state.
 
         Args:
             enabled: When False, all items are forced off regardless of
                 state (used while a viewer is open).
-            builder: The ModelBuilder to read model state from. Defaults to
-                the active tab (which may be ``None`` if the active tab is
-                not a ModelBuilder, in which case all model-related items
-                are disabled). Pass an explicit builder when called from
-                inside a ``switch-page`` handler, where the
-                ``model_builder`` property has not yet committed to the new
-                page.
+            source: The model source to read model state from. Defaults to the
+                active tab (``None`` if it isn't a model source, in which case
+                model-related items are disabled). Pass an explicit source from
+                a ``switch-page`` handler, where the ``active_source`` property
+                has not yet committed to the new page.
         """
-        if builder is None:
-            builder = self.model_builder
-        has_model = (
-            builder is not None
-            and builder.get_selected_model_name() is not None
-        )
+        if source is None:
+            source = self.active_source
+        has_model = source is not None and source.has_model()
         has_mesh = self._core.has_mesh()
         has_picks = bool(self._picked_faces)
         has_vertex_picks = bool(self._picked_vertices)
@@ -754,13 +744,16 @@ class CadQueryApp(Gtk.Window):
         self.menu_save_mesh.set_sensitive(enabled and has_mesh)
         self.menu_show_stats.set_sensitive(enabled and has_mesh)
 
-    def _on_params_changed(self, builder) -> None:
-        """Clear stored mesh and face picks when model parameters change.
+    def _invalidate_selections(self, source=None) -> None:
+        """Drop the held mesh and all picks/owners/refinements, then refresh
+        menu sensitivity.
 
-        Persistent face IDs can shift when parameters alter topology
-        (e.g. a dimension change that adds or removes a fillet), so the
-        previous selection is dropped to avoid silently writing wrong
-        MeshEntityContainers.
+        Called whenever the active model changes — a parameter or model-type
+        change, a tab switch, or (later) a STEP import. Persistent face/vertex
+        IDs can shift when topology changes, so stale picks are dropped to avoid
+        silently writing wrong MeshEntityContainers. ``source`` is forwarded to
+        the sensitivity refresh (needed from ``switch-page``, where
+        ``active_source`` hasn't committed yet).
         """
         self._finalize_current_mesh()
         self._picked_faces = []
@@ -768,17 +761,15 @@ class CadQueryApp(Gtk.Window):
         self._cap_face = None
         self._refinements = []
         self._mesh_settings = None
-        self._sync_menu_sensitivity()
+        self._sync_menu_sensitivity(source=source)
+
+    def _on_params_changed(self, builder) -> None:
+        """Model parameters changed → invalidate held mesh + picks."""
+        self._invalidate_selections()
 
     def _on_model_type_changed(self, builder, name: str) -> None:
-        """Clear stored mesh and face picks when model type selection changes"""
-        self._finalize_current_mesh()
-        self._picked_faces = []
-        self._picked_vertices = []
-        self._cap_face = None
-        self._refinements = []
-        self._mesh_settings = None
-        self._sync_menu_sensitivity()
+        """Model-type selection changed → invalidate held mesh + picks."""
+        self._invalidate_selections()
 
     def _on_destroy(self, window) -> None:
         """Clean up mesh resources on window destroy"""
@@ -790,7 +781,7 @@ class CadQueryApp(Gtk.Window):
         Filters out emissions from the inactive tab so they don't overwrite
         the active tab's status display.
         """
-        if builder is not self.model_builder:
+        if builder is not self.active_source:
             return
         self.status_label.set_text(message)
         self._sync_menu_sensitivity()
