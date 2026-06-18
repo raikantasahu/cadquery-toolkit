@@ -39,7 +39,7 @@ def _make_filter(name, patterns):
 
 
 def _run_dialog(title, parent, action, filters, default_name=None,
-                swap_ext=False):
+                swap_ext=False, initial_dir=None):
     """Run a GTK file chooser dialog.
 
     Args:
@@ -81,6 +81,9 @@ def _run_dialog(title, parent, action, filters, default_name=None,
         [p for entry in filters for p in entry[1]],
     )
     dialog.add_filter(all_filter)
+
+    if initial_dir:
+        dialog.set_current_folder(initial_dir)
 
     if is_save:
         dialog.set_do_overwrite_confirmation(True)
@@ -176,12 +179,13 @@ def ask_open_file(parent=None):
     return filename
 
 
-def ask_save_mesh_file(parent, default_name):
+def ask_save_mesh_file(parent, default_name, initial_dir=None):
     """Show a save dialog for mesh files (Gmsh or JSON).
 
     Args:
         parent: Parent GTK window.
         default_name: Default filename stem (without extension).
+        initial_dir: Folder to open in (e.g. the last save location).
 
     Returns:
         Tuple of (filepath, format) where format is one of "msh",
@@ -191,18 +195,20 @@ def ask_save_mesh_file(parent, default_name):
         "Save Mesh File", parent,
         Gtk.FileChooserAction.SAVE, _MESH_FILTERS,
         default_name=f"{default_name}.msh", swap_ext=True,
+        initial_dir=initial_dir,
     )
     if filename is None:
         return None
     return _ensure_extension(_MESH_FILTERS, filename, idx)
 
 
-def ask_export_file(parent, default_name):
+def ask_export_file(parent, default_name, initial_dir=None):
     """Show a save dialog for CAD model export (JSON or STEP).
 
     Args:
         parent: Parent GTK window.
         default_name: Default filename stem (without extension).
+        initial_dir: Folder to open in (e.g. the last save location).
 
     Returns:
         Tuple of (filepath, format) where format is "step" or "json",
@@ -212,6 +218,7 @@ def ask_export_file(parent, default_name):
         "Export CAD Model", parent,
         Gtk.FileChooserAction.SAVE, _EXPORT_FILTERS,
         default_name=f"{default_name}.step", swap_ext=True,
+        initial_dir=initial_dir,
     )
     if filename is None:
         return None

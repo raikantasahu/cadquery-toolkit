@@ -81,6 +81,9 @@ class CadQueryApp(Gtk.Window):
         # Last-used Mesh Settings, persisted across dialog invocations for the
         # same model; reset to None (dialog defaults) when the model changes.
         self._mesh_settings: dict = None
+        # Last directory a model/mesh was saved to (session) — save/export
+        # dialogs reopen there, like the STEP import chooser.
+        self._last_save_dir: str = None
         self.connect("destroy", self._on_destroy)
 
         # cadquery-missing is handled before the window is built (main() shows a
@@ -523,12 +526,14 @@ class CadQueryApp(Gtk.Window):
             return
 
         model_name = builder.get_selected_model_name() or "model"
-        result = ask_export_file(self, model_name)
+        result = ask_export_file(self, model_name,
+                                 initial_dir=self._last_save_dir)
         if result is None:
             self.status_label.set_text("Export cancelled")
             return
 
         filename, fmt = result
+        self._last_save_dir = os.path.dirname(filename)
         try:
             self._core.export_model(filename, fmt)
             self.status_label.set_text(f"Exported to {Path(filename).name}")
@@ -642,12 +647,14 @@ class CadQueryApp(Gtk.Window):
         model_name = "model"
         if builder is not None:
             model_name = builder.get_selected_model_name() or model_name
-        result = ask_save_mesh_file(self, model_name)
+        result = ask_save_mesh_file(self, model_name,
+                                    initial_dir=self._last_save_dir)
         if result is None:
             self.status_label.set_text("Mesh save cancelled")
             return
 
         filename, fmt = result
+        self._last_save_dir = os.path.dirname(filename)
 
         # For owner containers the core needs the current model + picked owners;
         # sync them so it can resolve owner selections geometrically.
