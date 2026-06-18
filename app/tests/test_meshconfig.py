@@ -26,3 +26,14 @@ def test_unknown_element_type_errors():
 def test_nonpositive_sag_errors():
     with pytest.raises(ValueError):
         parse_mesh_basics({"relativeSagTolerance": 0}, _err)
+
+
+def test_generate_consumes_meshconfig(fixtures):
+    """The mesher's typed contract: GmshMesher.generate(MeshConfig) meshes."""
+    from mesher import GmshMesher, MeshConfig, MeshType
+    mesher = GmshMesher(fixtures["hertz"]["model"], model_name="h")
+    try:
+        stats = mesher.generate(MeshConfig(MeshType.TET4, element_size=8.0))
+        assert stats["element_count"] > 0
+    finally:
+        mesher.finalize()

@@ -10,11 +10,14 @@ Requirements:
 
 Usage:
     import cadquery as cq
-    from mesher import GmshMesher, MeshType
+    from mesher import create_mesh, MeshConfig, MeshType, GmshMesher
 
     result = cq.Workplane("XY").box(10, 10, 10)
+    # Friendly facade (string type + scalars):
+    mesher, stats = create_mesh(result, "tet4", 2.0, model_name="MyBox")
+    # ...or the typed contract directly:
     mesher = GmshMesher(result, model_name="MyBox")
-    stats = mesher.generate(MeshType.TET4, element_size=2.0)
+    stats = mesher.generate(MeshConfig(MeshType.TET4, element_size=2.0))
     mesher.save("mybox.msh")
 """
 
@@ -23,7 +26,7 @@ import math
 import tempfile
 import os
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
@@ -224,6 +227,29 @@ class RefinementSpec:
     part_index: Optional[int] = None
 
 
+@dataclass
+class MeshConfig:
+    """The mesher's unified, typed mesh configuration (Architecture-Review
+    T2.2). Replaces the loose scalar+spec argument list ``generate`` used to
+    take, so every consumer (GUI, app_cli, mesh_step_model, create_mesh) builds
+    the same typed object. References are already resolved to typed specs by the
+    caller — ``ExtrusionSpec`` (cap by PID or coordinate) and ``RefinementSpec``
+    (anchor coordinate) — so this is source-agnostic.
+
+    Fields:
+        mesh_type:              element type (TET4/TET10/HEX8/HEX20/HEX27).
+        element_size:           target element size (upper bound).
+        relative_sag_tolerance: optional curvature-driven refinement (δ/R).
+        extrusion:              optional ExtrusionSpec (-> structured hex8).
+        refinements:            local/contact RefinementSpec list (tet/recombine).
+    """
+    mesh_type: MeshType = MeshType.TET4
+    element_size: float = 5.0
+    relative_sag_tolerance: Optional[float] = None
+    extrusion: Optional["ExtrusionSpec"] = None
+    refinements: List["RefinementSpec"] = field(default_factory=list)
+
+
 # Topology for an extrusion, resolved from the cap face on the original solid.
 #   vol        : the solid's volume tag
 #   opp        : the opposite (target) face tag
@@ -252,11 +278,12 @@ def create_mesh(model, mesh_type_str, element_size, model_name="model",
         Tuple of (GmshMesher, stats_dict). The mesher holds the generated
         mesh and must be consumed by save_mesh() or finalize().
     """
-    mesh_type = MESH_TYPES[mesh_type_str]
     mesher = GmshMesher(model, model_name=model_name)
-    stats = mesher.generate(mesh_type, element_size,
-                            relative_sag_tolerance=relative_sag_tolerance,
-                            extrusion=extrusion, refinements=refinements)
+    config = MeshConfig(
+        mesh_type=MESH_TYPES[mesh_type_str], element_size=element_size,
+        relative_sag_tolerance=relative_sag_tolerance,
+        extrusion=extrusion, refinements=refinements or [])
+    stats = mesher.generate(config)
     return mesher, stats
 
 
@@ -408,32 +435,15 @@ class GmshMesher:
         self._initialized = False
         self._resolver = None   # GeometricResolver, built after geometry import
 
-    def generate(self, mesh_type: MeshType = MeshType.TET4,
-                 element_size: float = 5.0,
-                 relative_sag_tolerance: float = None,
-                 extrusion: "ExtrusionSpec" = None,
-                 refinements: Optional[List["RefinementSpec"]] = None) -> dict:
+    def generate(self, config: "MeshConfig") -> dict:
         """
-        Generate a volumetric mesh.
+        Generate a volumetric mesh from a unified ``MeshConfig`` (T2.2).
 
-        Args:
-            mesh_type: Element type (TET4, TET10, HEX8, HEX20, or HEX27).
-            element_size: Target element size (upper bound).
-            relative_sag_tolerance: Optional curvature-driven refinement.
-                S = δ/R, the max allowed sag-to-radius ratio on curved faces.
-                When set, enables Gmsh's MeshSizeFromCurvature with N =
-                π / arccos(1 − S) elements per 2π radians and relaxes the
-                minimum-size clamp so tight curves can actually refine.
-            extrusion: Optional ``ExtrusionSpec``. When given, produces
-                structured HEX8 by quad-meshing the named cap face and extruding
-                it through the thickness (``mesh_type`` is ignored — the result
-                is HEX8). ``element_size`` sets the in-plane quad size and
-                ``relative_sag_tolerance`` the curved cap-edge fidelity.
-            refinements: Optional list of ``RefinementSpec`` for local/contact
-                refinement around picked vertices (tet and recombined-hex paths
-                only; mutually exclusive with ``extrusion``). Each adds a
-                Distance+Threshold size field; together they combine — with
-                gmsh's own curvature sizing — via a single background Min field.
+        ``config`` carries the element type, target size, optional curvature
+        tolerance (S = δ/R), and already-resolved ``ExtrusionSpec`` /
+        ``RefinementSpec`` objects. Extrusion produces structured HEX8 (the
+        ``mesh_type`` is then ignored) and is mutually exclusive with
+        refinements. Use ``create_mesh`` for the string/scalar facade.
 
         Returns:
             Dictionary with mesh statistics: node_count, element_count,
@@ -447,9 +457,10 @@ class GmshMesher:
         # half-built model onto the next generate(). finalize() is idempotent,
         # so a caller's own error handling stays a no-op.
         try:
-            return self._run_generate(mesh_type, element_size,
-                                      relative_sag_tolerance, extrusion,
-                                      refinements)
+            return self._run_generate(
+                config.mesh_type, config.element_size,
+                config.relative_sag_tolerance, config.extrusion,
+                config.refinements)
         except Exception:
             self.finalize()
             raise

@@ -39,9 +39,9 @@ import yaml
 
 from importer import step_importer
 from mesher.gmsh_mesher import (
-    GmshMesher, MeshValidationError, ExtrusionSpec, RefinementSpec,
+    MeshValidationError, ExtrusionSpec, RefinementSpec,
 )
-from mesher import MESH_TYPES
+from mesher import create_mesh
 from meshconfig import parse_mesh_basics
 
 _FORMAT_EXTENSIONS = {
@@ -237,7 +237,6 @@ def main():
 
     element_type_str, element_size, relative_sag_tolerance = parse_mesh_basics(
         mesh_cfg, parser.error)
-    mesh_type = MESH_TYPES[element_type_str]
     mesh_owner = mesh_cfg.get("owner")
 
     # Compound extruded-hex config: cap face + through-thickness layers
@@ -292,17 +291,14 @@ def main():
     # --- Mesh ---
     model = step_importer.read(str(input_path))
 
-    mesher = GmshMesher(model, model_name=name)
     try:
-        stats = mesher.generate(
-            mesh_type,
-            element_size=element_size,
+        mesher, stats = create_mesh(
+            model, element_type_str, element_size, model_name=name,
             relative_sag_tolerance=relative_sag_tolerance,
-            extrusion=extrusion,
-            refinements=refinements,
+            extrusion=extrusion, refinements=refinements,
         )
     except MeshValidationError as e:
-        mesher.finalize()
+        # create_mesh's generate() finalizes the session on error.
         parser.error(str(e))
 
     if stats.get("warning"):
