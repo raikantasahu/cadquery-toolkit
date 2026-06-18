@@ -31,7 +31,7 @@ from typing import Optional
 try:
     import cadquery as cq
 
-    from converter import HAS_FREECAD, part_to_modeldata, assembly_to_modeldata
+    from converter import HAS_FREECAD
     from mesher import HAS_GMSH
     from dialogs import (
         ask_save_mesh_file, ask_export_file, ask_mesh_settings,
@@ -276,25 +276,14 @@ class CadQueryApp(Gtk.Window):
         viewer.connect('viewer-closed', lambda v: self._on_viewer_closed())
         viewer.connect('error', lambda v, msg: self._on_viewer_error(msg))
 
-        # Convert the freshly built model to a CAD_ModelData and feed it to
-        # the viewer. Assemblies route through assembly_to_modeldata; parts
-        # carry their build parameters / signature into the part envelope.
-        try:
-            if isinstance(model, cq.Assembly):
-                model_data = assembly_to_modeldata(model)
-            else:
-                model_data = part_to_modeldata(
-                    model,
-                    name=builder.get_selected_model_name() or "model",
-                    parameters=builder.get_current_build_params(),
-                    param_signature=builder.get_current_build_signature(),
-                )
-        except Exception as e:
-            self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
+        # Convert the active model to CADModelData via the core and feed it to
+        # the viewer (the core dispatches part vs assembly).
+        model_data = self._current_model_data()
+        if model_data is None:
             self.status_label.set_text("Error: Conversion failed")
             return
 
-        if not viewer.set_mesh_from_dict(model_data.to_dict()):
+        if not viewer.set_mesh_from_dict(model_data):
             self.status_label.set_text("Error: Failed to load mesh")
             return
 
@@ -369,35 +358,15 @@ class CadQueryApp(Gtk.Window):
         window title, status text, the pre-populated selection, and the
         close handler that commits the result.
         """
-        builder = self.model_builder
-        if builder is None:
-            return
-        if not builder.build_model():
-            return
-
-        model = builder.get_current_model()
-        try:
-            if isinstance(model, cq.Assembly):
-                model_data = assembly_to_modeldata(model)
-            else:
-                model_data = part_to_modeldata(
-                    model,
-                    name=builder.get_selected_model_name() or "model",
-                    parameters=builder.get_current_build_params(),
-                    param_signature=builder.get_current_build_signature(),
-                )
-        except Exception as e:
-            self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
-            self.status_label.set_text("Error: Conversion failed")
+        model_data = self._current_model_data()
+        if model_data is None:
             return
 
         viewer = ModelViewer()
         viewer.connect('viewer-closed', lambda v: on_closed(v))
         viewer.connect('error', lambda v, msg: self._on_viewer_error(msg))
 
-        if not viewer.set_mesh_from_dict(
-            model_data.to_dict(), with_face_index=True,
-        ):
+        if not viewer.set_mesh_from_dict(model_data, with_face_index=True):
             self.status_label.set_text("Error: Failed to load model")
             return
 
