@@ -262,7 +262,10 @@ class _FreeCADShape:
             return [], []
 
     def _extract_faces(self) -> None:
-        for face_index, face in enumerate(self.freecad_shape.Faces):
+        # Capture the face list once so face indices (F{i}) line up with the
+        # same objects _extract_solids matches against.
+        self._face_objects = list(self.freecad_shape.Faces)
+        for face_index, face in enumerate(self._face_objects):
             try:
                 area = face.Area
             except AttributeError:
@@ -295,12 +298,10 @@ class _FreeCADShape:
     # ------------------------------------------------------------------
 
     def _extract_solids(self) -> None:
-        for solid_index, _solid in enumerate(self.freecad_shape.Solids):
-            # Simplified — assume all faces belong to the solid.
-            face_list = list(range(len(self.faces_list)))
+        for solid_index, solid in enumerate(self.freecad_shape.Solids):
             self.volumes_list.append({
                 "persistentID": f"S{solid_index}",
-                "faceList": face_list,
+                "faceList": self._solid_face_indices(solid),
             })
 
         if self.volumes_list:
@@ -308,6 +309,26 @@ class _FreeCADShape:
                 "persistentID": "B0",
                 "volumeList": list(range(len(self.volumes_list))),
             })
+
+    def _solid_face_indices(self, solid) -> List[int]:
+        """Indices (into ``faces_list`` / ``_face_objects``) of the faces that
+        belong to ``solid``, matched by shared underlying topology (isSame).
+
+        Each solid owns only its own faces; the previous "all faces belong to
+        every solid" shortcut produced wrong volume->face topology for
+        multi-solid parts. If a face can't be matched it is dropped loudly.
+        """
+        indices = []
+        for sf in solid.Faces:
+            match = next((j for j, f in enumerate(self._face_objects)
+                          if f.isSame(sf)), None)
+            if match is None:
+                logger.warning(
+                    "solid face could not be matched to the part's face list; "
+                    "it will be omitted from the volume's faceList")
+                continue
+            indices.append(match)
+        return sorted(set(indices))
 
     # ------------------------------------------------------------------
     # Mass properties
