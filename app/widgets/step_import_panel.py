@@ -43,19 +43,33 @@ class StepImportPanel(Gtk.Box):
         heading.set_halign(Gtk.Align.START)
         self.pack_start(heading, False, False, 0)
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self._import_btn = Gtk.Button(label="Import STEP…")
         self._import_btn.connect('clicked', self._on_import_clicked)
         row.pack_start(self._import_btn, False, False, 0)
-        self._view_btn = Gtk.Button(label="View")
-        self._view_btn.set_sensitive(False)
-        self._view_btn.connect('clicked', lambda _b: self.request_view())
-        row.pack_start(self._view_btn, False, False, 0)
         self.pack_start(row, False, False, 0)
 
         self._file_label = Gtk.Label(label="No file imported")
         self._file_label.set_halign(Gtk.Align.START)
         self.pack_start(self._file_label, False, False, 0)
+
+        # Bottom action row — matches the builder tabs: an accent "View Model"
+        # button pushed to the bottom after a separator.
+        self.pack_start(Gtk.Box(), True, True, 0)
+        self.pack_start(
+            Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+            False, False, 5)
+
+        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        button_box.set_halign(Gtk.Align.CENTER)
+        button_box.set_margin_top(10)
+        self._view_btn = Gtk.Button(label="View Model")
+        self._view_btn.get_style_context().add_class("suggested-action")
+        self._view_btn.set_sensitive(False)
+        self._view_btn.set_size_request(150, -1)
+        self._view_btn.connect('clicked', lambda _b: self.request_view())
+        button_box.pack_start(self._view_btn, False, False, 0)
+        self.pack_start(button_box, False, False, 0)
 
     # ---- model-source surface ----
     def get_current_model(self):
