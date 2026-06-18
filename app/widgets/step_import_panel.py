@@ -11,6 +11,7 @@ selection-invalidation. Holds one imported model at a time; re-import replaces.
 See docs/plans/STEP-Import-GUI.md.
 """
 import logging
+import os
 from pathlib import Path
 
 import gi
@@ -37,6 +38,8 @@ class StepImportPanel(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self._model = None
         self._name = None
+        self._loaded_name = None        # basename of the loaded file (display)
+        self._last_dir = None           # remembered import directory (session)
         self.last_status_message = ""
 
         heading = Gtk.Label()
@@ -50,7 +53,7 @@ class StepImportPanel(Gtk.Box):
         row.pack_start(self._import_btn, False, False, 0)
         self.pack_start(row, False, False, 0)
 
-        self._file_label = Gtk.Label(label="No file imported")
+        self._file_label = Gtk.Label()
         self._file_label.set_halign(Gtk.Align.START)
         self.pack_start(self._file_label, False, False, 0)
 
@@ -68,6 +71,8 @@ class StepImportPanel(Gtk.Box):
             lambda _b: self.request_view())
         button_box.pack_start(self._view_btn, False, False, 0)
         self.pack_start(button_box, False, False, 0)
+
+        self._apply_state_label()
 
     # ---- model-source surface ----
     def get_current_model(self):
@@ -109,6 +114,8 @@ class StepImportPanel(Gtk.Box):
         for pattern in ("*.step", "*.stp", "*.STEP", "*.STP"):
             flt.add_pattern(pattern)
         dialog.add_filter(flt)
+        if self._last_dir:
+            dialog.set_current_folder(self._last_dir)
         response = dialog.run()
         path = dialog.get_filename() if response == Gtk.ResponseType.OK else None
         dialog.destroy()
@@ -116,21 +123,39 @@ class StepImportPanel(Gtk.Box):
             self._load(path)
 
     def _load(self, path: str) -> None:
+        name = Path(path).name
+        # Reading a large STEP blocks; show feedback before it starts.
+        self._file_label.set_text(f"Importing {name}…")
+        self.emit('status-changed', f"Importing {name}…")
+        while Gtk.events_pending():
+            Gtk.main_iteration()
         try:
             model = step_importer.read(path)
         except Exception as e:
             # Loud, named — never a silent failed import.
             logger.warning("failed to import STEP %s: %s", path, e,
                            exc_info=True)
+            self._apply_state_label()       # restore prior/empty state
             self._error(f"Could not import STEP file:\n{path}\n\n{e}")
             return
         self._model = model
         self._name = Path(path).stem
-        self._file_label.set_text(f"Imported: {Path(path).name}")
+        self._loaded_name = name
+        self._last_dir = os.path.dirname(path)
         self._view_btn.set_sensitive(True)
-        self.last_status_message = f"Imported {Path(path).name}"
+        self._apply_state_label()
+        self.last_status_message = f"Imported {name}"
         self.emit('status-changed', self.last_status_message)
         self.emit('model-changed')
+
+    def _apply_state_label(self) -> None:
+        """Set the file label from current state — the loaded file, or a dim
+        empty-state hint when nothing is imported."""
+        if self._model is not None:
+            self._file_label.set_text(f"Imported: {self._loaded_name}")
+        else:
+            self._file_label.set_markup(
+                '<i>No file imported. Click "Import STEP…" above.</i>')
 
     def _error(self, message: str) -> None:
         dialog = Gtk.MessageDialog(
