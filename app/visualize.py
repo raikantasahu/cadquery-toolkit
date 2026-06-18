@@ -34,7 +34,8 @@ from mesher import (
     meshdata_to_pyvista,
     meshdata_xml_to_dict,
 )
-from viewer import create_polydata_from_model_data, show_pyvista
+from model.tessellation import create_polydata_from_model_data
+from viewer import show_pyvista
 
 
 def load_file(path):

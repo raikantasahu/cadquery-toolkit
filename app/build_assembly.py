@@ -71,7 +71,8 @@ def main():
         # Convert once if we haven't already; the viewer reads the envelope.
         if model_data is None:
             model_data = assembly_to_modeldata(assy)
-        from viewer import create_polydata_from_model_data, show_pyvista
+        from model.tessellation import create_polydata_from_model_data
+        from viewer import show_pyvista
         show_pyvista(
             create_polydata_from_model_data(model_data.to_dict()),
             title=assy.name,

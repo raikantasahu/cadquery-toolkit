@@ -10,7 +10,7 @@ import gmsh
 import numpy as np
 
 from converter import assembly_to_modeldata, part_to_modeldata
-from viewer.model_viewer import create_polydatas_per_part
+from model.tessellation import create_polydatas_per_part
 
 
 @contextlib.contextmanager

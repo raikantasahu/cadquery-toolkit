@@ -8,14 +8,14 @@ import gmsh
 
 from helpers import cadmodeldata, dist, gmsh_session
 from mesher.resolver import GeometricResolver
-from viewer.model_viewer import anchor_for_pick
+from model.tessellation import anchor_for_pick
 
 
 def test_picked_face_and_vertex_anchors_resolve(fixtures):
     model = fixtures["hertz"]["model"]
     md = cadmodeldata(model)
     # picker PIDs are global F#/V# in CAD-traversal order
-    from viewer.model_viewer import create_polydatas_per_part
+    from model.tessellation import create_polydatas_per_part
     face_pids, vtx_pids = [], []
     for _label, pd in create_polydatas_per_part(md, with_face_index=True):
         fd = pd.field_data

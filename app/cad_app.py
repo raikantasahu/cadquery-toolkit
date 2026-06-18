@@ -34,7 +34,7 @@ from dialogs import (
 )
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
-from viewer.model_viewer import (
+from model.tessellation import (
     enumerate_part_labels, create_polydatas_per_part, anchor_for_pick,
 )
 
