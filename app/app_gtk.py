@@ -14,6 +14,7 @@ Usage:
 # main() can show the friendly dialog (T1.3).
 from __future__ import annotations
 
+import logging
 import os
 os.environ['NO_AT_BRIDGE'] = '1'
 
@@ -844,6 +845,8 @@ def _show_import_error(exc: ImportError) -> None:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # Set environment for Mesa rendering if needed
     if 'DISPLAY' not in os.environ or not os.environ['DISPLAY']:
         os.environ['DISPLAY'] = ':0'

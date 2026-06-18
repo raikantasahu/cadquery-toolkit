@@ -22,6 +22,7 @@ Usage:
 """
 
 import enum
+import logging
 import math
 import tempfile
 import os
@@ -31,6 +32,8 @@ from typing import List, Optional
 
 import numpy as np
 import pyvista as pv
+
+logger = logging.getLogger(__name__)
 
 try:
     import gmsh
@@ -880,6 +883,12 @@ class GmshMesher:
                 kappa = abs(gmsh.model.getCurvature(
                     1, etag, [(b[0][0] + b[1][0]) / 2.0])[0])
             except Exception:
+                # Curvature couldn't be sampled: this curved cap edge is then
+                # excluded from sag sizing (no local refinement there). Warn
+                # loudly, naming the edge, rather than silently coarsening it.
+                logger.warning(
+                    "could not sample curvature on cap edge %d; excluding it "
+                    "from sag-based sizing", etag, exc_info=True)
                 kappa = 0.0
             if kappa > 1e-9:
                 sizes.append(2.0 * math.pi * (1.0 / kappa) / n_per_circle)

@@ -25,6 +25,7 @@ CADModelData PID (F#/V#, deterministic for a registry model — use
     output: {format: meshdata_json}                      # json | meshdata_json | msh
 """
 import argparse
+import logging
 import sys
 
 import yaml
@@ -116,6 +117,8 @@ def _list_entities(core):
 
 
 def main(argv=None):
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(
         description="Mesh a registry model (part/assembly) via AppCore.")
     parser.add_argument("model", help="registry model name")

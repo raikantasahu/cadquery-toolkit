@@ -15,9 +15,12 @@ state. Callers own the registry they assign to.
 
 import importlib
 import inspect
+import logging
 import pkgutil
 from pathlib import Path
 from typing import Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def discover(
@@ -77,10 +80,12 @@ def discover(
                     if getattr(obj, decorator_attr, False):
                         registry[name] = obj
 
-        except Exception as e:
-            print(
-                f"Warning: Failed to load {kind_label} module "
-                f"'{module_info.name}': {e}"
-            )
+        except Exception:
+            # A broken model module would otherwise vanish silently from the
+            # GUI dropdown / CLI registry. Log it loudly, naming the module,
+            # with the traceback so the author can fix it.
+            logger.warning(
+                "Failed to load %s module '%s' — it will be missing from the "
+                "registry.", kind_label, module_info.name, exc_info=True)
 
     return registry

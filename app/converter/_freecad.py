@@ -18,9 +18,12 @@ There is no public API here. Use `converter.part_to_modeldata` instead.
 
 import hashlib
 import inspect
+import logging
 import os
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 try:
     import cadquery as cq  # noqa: F401
@@ -233,7 +236,8 @@ class _FreeCADShape:
     # Face extraction
     # ------------------------------------------------------------------
 
-    def _triangulate_face(self, face) -> Tuple[List[float], List[int]]:
+    def _triangulate_face(self, face, face_index=None
+                          ) -> Tuple[List[float], List[int]]:
         try:
             mesh_data = face.tessellate(0.1)
             vertices = mesh_data[0]
@@ -248,8 +252,13 @@ class _FreeCADShape:
                 connectivity.extend(tri)
 
             return vertex_locations, connectivity
-        except Exception as e:
-            print(f"Warning: Could not triangulate face: {e}")
+        except Exception:
+            # The face will have no display/query triangulation. Warn loudly,
+            # naming the face, rather than emitting a silently empty face.
+            logger.warning(
+                "could not triangulate face F%s — it will have no "
+                "triangulation", face_index if face_index is not None else "?",
+                exc_info=True)
             return [], []
 
     def _extract_faces(self) -> None:
@@ -268,7 +277,8 @@ class _FreeCADShape:
                 if edge_idx >= 0:
                     edge_list.append(edge_idx)
 
-            vertex_locations, connectivity = self._triangulate_face(face)
+            vertex_locations, connectivity = self._triangulate_face(
+                face, face_index)
 
             self.faces_list.append({
                 "persistentID": f"F{face_index}",

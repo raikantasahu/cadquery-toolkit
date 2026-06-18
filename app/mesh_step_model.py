@@ -33,6 +33,7 @@ Example config (mesh_config.yaml):
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 import yaml
@@ -41,7 +42,7 @@ from importer import step_importer
 from mesher.gmsh_mesher import (
     MeshValidationError, ExtrusionSpec, RefinementSpec,
 )
-from mesher import create_mesh
+from mesher import create_mesh, HAS_GMSH
 from meshconfig import parse_mesh_basics
 
 _FORMAT_EXTENSIONS = {
@@ -182,6 +183,8 @@ def _print_manifest(entities):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(
         description="Generate a volumetric mesh from a STEP file.",
     )
@@ -287,6 +290,9 @@ def main():
 
     name = args.name or input_path.stem
     owner = mesh_owner or name
+
+    if not HAS_GMSH:
+        parser.error("Gmsh is not installed. Run: pip install gmsh")
 
     # --- Mesh ---
     model = step_importer.read(str(input_path))
