@@ -23,23 +23,18 @@ from converter import (
     HAS_CADQUERY, HAS_FREECAD,
     part_to_modeldata, assembly_to_modeldata,
 )
-from exporter import cadmodeldata_exporter, step_exporter
-from mesher import (
-    HAS_GMSH, create_mesh, save_mesh, save_mesh_json,
-    save_mesh_meshdata_json, ExtrusionSpec, RefinementSpec,
-)
+from mesher import HAS_GMSH
 from dialogs import (
     ask_save_mesh_file, ask_export_file, ask_mesh_settings,
     edit_face_selection, pick_entities,
 )
 from widgets import ModelBuilder
 from viewer import ModelViewer, show_mesh
-from model.tessellation import (
-    enumerate_part_labels, create_polydatas_per_part, anchor_for_pick,
-)
 
 from models.parts import get_all_parts
 from models.assemblies import get_all_assemblies
+
+from app_core import AppCore
 
 
 class CadQueryApp(Gtk.Window):
@@ -55,9 +50,9 @@ class CadQueryApp(Gtk.Window):
         if icon_path.exists():
             self.set_icon_from_file(str(icon_path))
 
-        # Mesh state
-        self._current_mesh = None
-        self._current_mesh_stats = None
+        # Model + mesh state live in the GTK-free core; the window keeps only
+        # UI/selection state (the picks below) and delegates domain logic.
+        self._core = AppCore()
         # Face / vertex picks: lists of (persistent_id, owner_label) tuples.
         # Populated by the model viewer's pick modes; both consumed by the
         # MeshData save flow as entity_owners. Cleared on model change.
@@ -469,31 +464,37 @@ class CadQueryApp(Gtk.Window):
             f"{'vertex' if n == 1 else 'vertices'}."
         )
 
-    def _current_model_data(self) -> Optional[dict]:
-        """Build the active model's CADModelData dict for picking, or None.
+    def _sync_core_model(self) -> bool:
+        """Build the active builder's model and load it into the core.
 
-        Shared entry point for any pick-driven mesh control (see
-        ``dialogs.entity_picker.pick_entities``). Shows an error dialog and
-        returns None if there's no model or conversion fails.
+        The GTK side owns the builder (a widget); it hands the built model +
+        params to the GTK-free core. Returns False if there's no model.
         """
         builder = self.model_builder
         if builder is None or not builder.build_model():
-            return None
+            return False
         model = builder.get_current_model()
+        name = builder.get_selected_model_name() or "model"
+        if isinstance(model, cq.Assembly):
+            self._core.set_model(model, name)
+        else:
+            self._core.set_model(
+                model, name,
+                parameters=builder.get_current_build_params(),
+                param_signature=builder.get_current_build_signature(),
+            )
+        return True
+
+    def _current_model_data(self) -> Optional[dict]:
+        """Sync the active model into the core and return its CADModelData dict
+        for picking, or None (with an error dialog on conversion failure)."""
+        if not self._sync_core_model():
+            return None
         try:
-            if isinstance(model, cq.Assembly):
-                model_data = assembly_to_modeldata(model)
-            else:
-                model_data = part_to_modeldata(
-                    model,
-                    name=builder.get_selected_model_name() or "model",
-                    parameters=builder.get_current_build_params(),
-                    param_signature=builder.get_current_build_signature(),
-                )
+            return self._core.model_data()
         except Exception as e:
             self._show_error("Conversion Error", f"Failed to convert model:\n{e}")
             return None
-        return model_data.to_dict()
 
     def _pick_single_cap_face(self):
         """Pick ONE cap face for extruded hex; return (pid, label) or None.
@@ -525,66 +526,23 @@ class CadQueryApp(Gtk.Window):
             initial=[current] if current else [],
         )
 
-    def _resolve_vertex_anchor(self, picked):
-        """Resolve a picked vertex ``(pid, label)`` to ``(coord, part_index)``.
-
-        The picker's vertex ids are not portable to the mesher (CAD traversal
-        order != gmsh import order on assemblies), but the vertex's world
-        coordinate is — and so is its 0-based part index (assembly order ==
-        gmsh volume order). Both come from the same per-part PolyData the picker
-        itself used. The mesher re-identifies its own vertex from the
-        coordinate. Returns ``(coord_tuple, part_index)`` or ``None``.
-        """
-        if not picked:
-            return None
-        pid = picked[0]
-        model_data = self._current_model_data()
-        if model_data is None:
-            return None
-        import numpy as np
-        for part_index, (_label, pd) in enumerate(
-                create_polydatas_per_part(model_data, with_face_index=True)):
-            fd = pd.field_data
-            if "vertex_pids" not in fd:
-                continue
-            pids = [str(v) for v in fd["vertex_pids"]]
-            pts = np.asarray(fd["vertex_points"]).reshape(-1, 3)
-            for vpid, p in zip(pids, pts):
-                if vpid == pid:
-                    return (tuple(float(c) for c in p), part_index)
-        return None
-
     def _on_menu_export(self, menuitem) -> None:
         """Handle Model > Export menu activation"""
         builder = self.model_builder
         if builder is None:
             return
-        if not builder.build_model():
+        if not self._sync_core_model():
             return
 
         model_name = builder.get_selected_model_name() or "model"
-        model = builder.get_current_model()
         result = ask_export_file(self, model_name)
-
         if result is None:
             self.status_label.set_text("Export cancelled")
             return
 
         filename, fmt = result
-
         try:
-            if fmt == "step":
-                step_exporter.export(model, filename)
-            elif isinstance(model, cq.Assembly):
-                cadmodeldata_exporter.export(model, filename)
-            else:
-                cadmodeldata_exporter.export(
-                    model,
-                    filename,
-                    name=model_name,
-                    parameters=builder.get_current_build_params(),
-                    param_signature=builder.get_current_build_signature(),
-                )
+            self._core.export_model(filename, fmt)
             self.status_label.set_text(f"Exported to {Path(filename).name}")
             self._show_info("Export Successful", f"Model exported to:\n{filename}")
         except Exception as e:
@@ -639,87 +597,22 @@ class CadQueryApp(Gtk.Window):
         # Persist the accepted settings for the next invocation (same model).
         self._mesh_settings = mesh_config
 
-        # Build the extrusion spec when extruded hex is requested.
-        extrusion = None
-        ex = mesh_config.get('extrusion')
-        if ex:
-            if not ex.get('cap_face'):
-                self._show_error(
-                    "Mesh Error",
-                    "Extruded hex needs a cap face.\n"
-                    "Click \"Pick…\" in the mesh dialog to choose one."
-                )
-                self.status_label.set_text("Error: no cap face for extrusion")
-                return
-            cap_anchor = self._face_anchor(ex['cap_face'])
-            if cap_anchor is None:
-                self._show_error(
-                    "Mesh Error",
-                    "Could not resolve the picked cap face on the current "
-                    "model."
-                )
-                self.status_label.set_text("Error: cap face unresolved")
-                return
-            extrusion = ExtrusionSpec(
-                cap_face_at=cap_anchor['centroid'],
-                cap_face_area=cap_anchor.get('area'),
-                num_layers=ex['num_layers'])
-
-        # Build refinement specs from the region table. Each region anchors on a
-        # picked vertex resolved to its world COORDINATE (and 0-based part index
-        # for local scope): picker vertex ids do not match gmsh's import ordering
-        # on assemblies, but coordinates and part order do. See
-        # _resolve_vertex_anchor. mesh_config['refinements'] is empty while
-        # extruding (mutually exclusive).
-        refinements = []
-        for region in mesh_config.get('refinements', []):
-            anchor = self._resolve_vertex_anchor(
-                (region['vertex_pid'], region.get('vertex_label', '')))
-            if anchor is None:
-                self._show_error(
-                    "Mesh Error",
-                    f"Refinement vertex {region['vertex_pid']} could not be "
-                    "resolved on the current model."
-                )
-                self.status_label.set_text("Error: unresolved refinement vertex")
-                return
-            coord, part_index = anchor
-            refinements.append(RefinementSpec(
-                at=coord, fine_size=region['fine_size'],
-                radius=region['radius'], scope=region['scope'],
-                part_index=part_index if region['scope'] == 'local' else None))
-
-        builder = self.model_builder
-        if builder is None:
+        # Sync the active model into the core; it resolves the cap face and
+        # refinement vertices geometrically from mesh_config and meshes.
+        if self._current_model_data() is None:
             return
-        if not builder.build_model():
-            return
-
-        # Finalize any previously held mesh
-        self._finalize_current_mesh()
-
-        model = builder.get_current_model()
-        model_name = builder.get_selected_model_name() or "model"
 
         self.status_label.set_text("Generating mesh...")
         while Gtk.events_pending():
             Gtk.main_iteration()
 
         try:
-            mesh, stats = create_mesh(
-                model, mesh_config['mesh_type'], mesh_config['element_size'],
-                model_name=model_name,
-                relative_sag_tolerance=mesh_config['relative_sag_tolerance'],
-                extrusion=extrusion,
-                refinements=refinements,
-            )
+            stats = self._core.mesh(mesh_config)
         except Exception as e:
             self._show_error("Mesh Error", f"Failed to generate mesh:\n{str(e)}")
             self.status_label.set_text("Error: Mesh generation failed")
             return
 
-        self._current_mesh = mesh
-        self._current_mesh_stats = stats
         self._sync_menu_sensitivity()
 
         summary = (
@@ -734,10 +627,10 @@ class CadQueryApp(Gtk.Window):
 
     def _on_menu_view_mesh(self, menuitem) -> None:
         """Handle Mesh > View Mesh menu activation"""
-        if self._current_mesh is None:
+        if not self._core.has_mesh():
             return
 
-        ugrid = self._current_mesh.get_pyvista_mesh()
+        ugrid = self._core.mesh_object.get_pyvista_mesh()
 
         self.parts_builder.set_sensitive_controls(False)
         self.assemblies_builder.set_sensitive_controls(False)
@@ -754,7 +647,7 @@ class CadQueryApp(Gtk.Window):
 
     def _on_menu_save_mesh(self, menuitem) -> None:
         """Handle Mesh > Save Mesh menu activation"""
-        if self._current_mesh is None:
+        if not self._core.has_mesh():
             return
 
         builder = self.model_builder
@@ -768,20 +661,15 @@ class CadQueryApp(Gtk.Window):
 
         filename, fmt = result
 
+        # For owner containers the core needs the current model + picked owners;
+        # sync them so it can resolve owner selections geometrically.
         if fmt == "meshdata_json":
-            selections, entity_owners = self._build_owner_inputs(builder)
-        else:
-            selections, entity_owners = None, None
+            if self._current_model_data() is None:
+                return
+            self._core.set_face_owners(self._picked_faces)
+            self._core.set_vertex_owners(self._picked_vertices)
         try:
-            if fmt == "meshdata_json":
-                save_mesh_meshdata_json(
-                    self._current_mesh, filename, owner=model_name,
-                    entity_owners=entity_owners, selections=selections,
-                )
-            elif fmt == "json":
-                save_mesh_json(self._current_mesh, filename, title=model_name)
-            else:
-                save_mesh(self._current_mesh, filename)
+            self._core.save_mesh(filename, fmt, model_name=model_name)
         except Exception as e:
             self._show_error("Mesh Error", f"Failed to save mesh:\n{str(e)}")
             self.status_label.set_text("Error: Mesh save failed")
@@ -790,43 +678,14 @@ class CadQueryApp(Gtk.Window):
         self.status_label.set_text(f"Mesh saved to {Path(filename).name}")
 
     def _face_anchor(self, pid):
-        """Geometric anchor for a picked face PID (or None)."""
-        model_data = self._current_model_data()
-        return anchor_for_pick(model_data, pid) if model_data else None
-
-    def _build_owner_inputs(self, builder):
-        """Return ``(selections, entity_owners)`` for MeshData JSON save.
-
-        Picked faces/vertices become GEOMETRIC selections resolved by the
-        mesher's geometric resolver (correct across STEP sources, unlike the
-        old F#/V#==gmsh-tag-1 assumption). Per-part ``P{i}`` fragment owners
-        stay as legacy entity_owners — part order is preserved, so they are
-        safe. Returns ``(None, None)`` when nothing to attach.
-        """
-        if builder is None:
-            return None, None
-        model_data = self._current_model_data()
-        if model_data is None:
-            return None, None
-
-        selections = []
-        for pid, label in (self._picked_faces + self._picked_vertices):
-            anchor = anchor_for_pick(model_data, pid)
-            if anchor is not None:
-                selections.append((anchor, label))
-
-        entity_owners: dict = {}
-        try:
-            for i, label in enumerate(enumerate_part_labels(model_data)):
-                entity_owners.setdefault(f"P{i}", label)
-        except Exception:
-            pass
-
-        return (selections or None), (entity_owners or None)
+        """Geometric anchor for a picked face PID via the core (or None)."""
+        if self._current_model_data() is None:
+            return None
+        return self._core.face_anchor(pid)
 
     def _on_menu_show_stats(self, menuitem) -> None:
         """Handle Mesh > Show Stats menu activation"""
-        stats = self._current_mesh_stats
+        stats = self._core.mesh_stats()
         if stats is None:
             return
 
@@ -872,11 +731,8 @@ class CadQueryApp(Gtk.Window):
     # --- Menu helper methods ---
 
     def _finalize_current_mesh(self) -> None:
-        """Finalize the stored mesh if one exists"""
-        if self._current_mesh is not None:
-            self._current_mesh.finalize()
-            self._current_mesh = None
-            self._current_mesh_stats = None
+        """Finalize the core's stored mesh if one exists"""
+        self._core.finalize()
 
     def _sync_menu_sensitivity(
         self,
@@ -902,7 +758,7 @@ class CadQueryApp(Gtk.Window):
             builder is not None
             and builder.get_selected_model_name() is not None
         )
-        has_mesh = self._current_mesh is not None
+        has_mesh = self._core.has_mesh()
         has_picks = bool(self._picked_faces)
         has_vertex_picks = bool(self._picked_vertices)
         self.menu_view.set_sensitive(enabled and has_model)
