@@ -38,7 +38,7 @@ try:
         ask_save_mesh_file, ask_export_file, ask_mesh_settings,
         edit_face_selection, pick_entities,
     )
-    from widgets import ModelBuilder
+    from widgets import ModelBuilder, StepImportPanel
     from viewer import ModelViewer, show_mesh
     from models.parts import get_all_parts
     from models.assemblies import get_all_assemblies
@@ -189,6 +189,19 @@ class CadQueryApp(Gtk.Window):
             self.assemblies_builder, Gtk.Label(label="Assemblies"),
         )
 
+        # Third source: an imported external STEP, used exactly like a built
+        # model. Its signal set differs from a builder (no params/type change;
+        # a single model-changed on import), so it is wired here.
+        self.step_panel = StepImportPanel()
+        self._add_tab_padding(self.step_panel)
+        self.step_panel.connect('view-requested', self._on_view_requested)
+        self.step_panel.connect('status-changed', self._on_status_changed)
+        self.step_panel.connect(
+            'model-changed', lambda _panel: self._invalidate_selections())
+        self.notebook.append_page(
+            self.step_panel, Gtk.Label(label="Imported STEP"),
+        )
+
         vbox.pack_start(self.notebook, True, True, 0)
 
         # Status bar
@@ -230,7 +243,7 @@ class CadQueryApp(Gtk.Window):
         if page_num < 0:
             return None
         page = self.notebook.get_nth_page(page_num)
-        return page if isinstance(page, ModelBuilder) else None
+        return page if isinstance(page, (ModelBuilder, StepImportPanel)) else None
 
     def _wire_builder(self, builder: ModelBuilder) -> None:
         """Connect a ModelBuilder's signals to the app's handlers."""
