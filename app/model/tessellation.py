@@ -13,23 +13,11 @@ import numpy as np
 import pyvista as pv
 from typing import Any, Dict, List, Optional
 
+from model.CADModelData import _ci_get
+
 
 # ── Helpers for reading CAD_ModelData ────────────────────────────────────────
-
-
-def _ci_get(d: Dict[str, Any], name: str, default: Any = None) -> Any:
-    """Case-insensitive dict lookup.
-
-    Lets us read both camelCase (Python writer) and PascalCase (C# writer)
-    CAD_ModelData JSON without caring which side produced it.
-    """
-    if name in d:
-        return d[name]
-    lower = name.lower()
-    for k, v in d.items():
-        if k.lower() == lower:
-            return v
-    return default
+# _ci_get (case-insensitive dict read) is shared with the schema module.
 
 
 def _identity_matrix() -> List[float]:
@@ -97,67 +85,107 @@ def _emit_face(
     vertex_offset[0] += num_vertices
 
 
-def _walk_envelope(
-    models: List[Dict[str, Any]],
-    model_index: int,
-    parent_transform: List[float],
-    all_vertices: List[List[float]],
-    all_faces: List[int],
-    vertex_offset: List[int],
-    visited: set,
-    cell_face_index: Optional[List[int]] = None,
-    face_pids: Optional[List[str]] = None,
-) -> None:
-    """Recursively emit faces from one model and its children, in world space.
+def _iter_envelope(data: Dict[str, Any]):
+    """Yield ``(model, component_name, world_transform)`` for every model in the
+    CAD_ModelData envelope, DFS pre-order, composing parent transforms.
 
-    `parent_transform` is the world-space placement of this model. Each
-    Component holds a child's local-to-parent transform; we compose with the
-    parent to obtain the child's world transform.
-
-    If ``cell_face_index``/``face_pids`` are provided, each emitted face
-    is appended to ``face_pids`` (verbatim PID string from CAD_ModelData)
-    and every triangle stamped with that face's index in ``face_pids``.
+    A part referenced by multiple Components is yielded once per instance:
+    ``visited`` rebinds per recursion path (not globally) so a shared PART is
+    re-emitted under each placement. Falls back to a flat single-model dict with
+    the identity transform. This is the single traversal shared by
+    create_polydata_from_model_data, enumerate_part_labels, and
+    create_polydatas_per_part.
     """
-    if model_index in visited:
-        # True cycle: this model is its own ancestor on the current
-        # recursion path. The envelope is acyclic by construction, but
-        # guard anyway to avoid infinite recursion on malformed input.
+    models = _ci_get(data, "models")
+    if not (isinstance(models, list) and models):
+        yield data, None, _identity_matrix()
         return
-    # Rebind to a new set local to this call so sibling traversals don't
-    # inherit each other's "seen" markers — required for shared sub-models
-    # (a single PART referenced by multiple Component instances).
-    visited = visited | {model_index}
+    root = int(_ci_get(data, "rootIndex", 0) or 0)
+    if not 0 <= root < len(models):
+        raise ValueError(
+            f"rootIndex {root} out of range (0..{len(models) - 1})")
 
-    model = models[model_index]
+    def _walk(index, transform, visited, component_name):
+        if index in visited:
+            return
+        visited = visited | {index}
+        yield models[index], component_name, transform
+        for component in _ci_get(models[index], "childComponents") or []:
+            child = int(_ci_get(component, "childIndex", 0) or 0)
+            if not 0 <= child < len(models):
+                continue
+            local = (_ci_get(component, "transformToParent")
+                     or _identity_matrix())
+            yield from _walk(child, _matmul4(transform, local), visited,
+                             _ci_get(component, "componentName"))
 
-    for face in _ci_get(model, "faceList") or []:
+    yield from _walk(root, _identity_matrix(), set(), None)
+
+
+def _label_for(model: Dict[str, Any], component_name,
+               counts: Dict[str, int]) -> str:
+    """Per-part display label with a ``#N`` suffix for repeated names. Prefer the
+    per-instance component name (instanced parts share one model whose own name
+    can't tell the instances apart)."""
+    name = str(component_name
+               or _ci_get(model, "componentName")
+               or _ci_get(model, "modelName")
+               or "part")
+    counts[name] = counts.get(name, 0) + 1
+    n = counts[name]
+    return name if n == 1 else f"{name} #{n}"
+
+
+def _emit_part(model, transform, face_counter, vertex_counter, with_face_index):
+    """Build one PolyData from a single model's faces (world space), or None if
+    it has no geometry. ``face_counter``/``vertex_counter`` are boxed ints for
+    global F#/V# numbering across parts (traversal order)."""
+    face_list = _ci_get(model, "faceList") or []
+    if not face_list:
+        return None
+
+    all_vertices: List[List[float]] = []
+    all_faces: List[int] = []
+    vertex_offset: List[int] = [0]
+    cell_face_index: Optional[List[int]] = [] if with_face_index else None
+    face_pids: Optional[List[str]] = [] if with_face_index else None
+
+    for face in face_list:
         face_index = -1
         if face_pids is not None:
-            pid = _ci_get(face, "persistentID")
             face_index = len(face_pids)
-            face_pids.append(str(pid) if pid is not None else f"_{face_index}")
-        _emit_face(
-            face, parent_transform, all_vertices, all_faces, vertex_offset,
-            cell_face_index=cell_face_index, face_index=face_index,
-        )
+            face_pids.append(f"F{face_counter[0]}")
+            face_counter[0] += 1
+        _emit_face(face, transform, all_vertices, all_faces, vertex_offset,
+                   cell_face_index=cell_face_index, face_index=face_index)
 
-    for component in _ci_get(model, "childComponents") or []:
-        child_index = int(_ci_get(component, "childIndex", 0) or 0)
-        if child_index < 0 or child_index >= len(models):
-            continue
-        child_local = _ci_get(component, "transformToParent") or _identity_matrix()
-        child_world = _matmul4(parent_transform, child_local)
-        _walk_envelope(
-            models,
-            child_index,
-            child_world,
-            all_vertices,
-            all_faces,
-            vertex_offset,
-            visited,
-            cell_face_index=cell_face_index,
-            face_pids=face_pids,
-        )
+    if not all_vertices:
+        return None
+
+    mesh = pv.PolyData(np.array(all_vertices, dtype=np.float64),
+                       np.array(all_faces, dtype=np.int64))
+    mesh.compute_normals(inplace=True)
+    if with_face_index and cell_face_index is not None:
+        mesh.cell_data["face_index"] = np.asarray(
+            cell_face_index, dtype=np.int32)
+        mesh.field_data["face_pids"] = np.asarray(face_pids, dtype=object)
+        # Topological vertices (corner points) for the vertex picker, numbered
+        # globally V# in the same traversal order as faces.
+        vtx_pids: List[str] = []
+        vtx_xyz: List[List[float]] = []
+        for vtx in _ci_get(model, "vertexList") or []:
+            loc = _ci_get(vtx, "location")
+            if not loc or len(loc) != 3:
+                continue
+            vtx_pids.append(f"V{vertex_counter[0]}")
+            vertex_counter[0] += 1
+            vtx_xyz.append([float(loc[0]), float(loc[1]), float(loc[2])])
+        if vtx_xyz:
+            pts_world = _transform_points(
+                np.asarray(vtx_xyz, dtype=np.float64), transform)
+            mesh.field_data["vertex_points"] = pts_world.flatten()
+            mesh.field_data["vertex_pids"] = np.asarray(vtx_pids, dtype=object)
+    return mesh
 
 
 def create_polydata_from_model_data(
@@ -195,39 +223,17 @@ def create_polydata_from_model_data(
     cell_face_index: Optional[List[int]] = [] if with_face_index else None
     face_pids: Optional[List[str]] = [] if with_face_index else None
 
-    models = _ci_get(data, "models")
-    if isinstance(models, list) and models:
-        root_index = int(_ci_get(data, "rootIndex", 0) or 0)
-        if root_index < 0 or root_index >= len(models):
-            raise ValueError(
-                f"rootIndex {root_index} out of range (0..{len(models) - 1})"
-            )
-        _walk_envelope(
-            models,
-            root_index,
-            _identity_matrix(),
-            all_vertices,
-            all_faces,
-            vertex_offset,
-            visited=set(),
-            cell_face_index=cell_face_index,
-            face_pids=face_pids,
-        )
-    else:
-        # Flat single-model fallback.
-        identity = _identity_matrix()
-        for face in _ci_get(data, "faceList") or []:
+    for model, _component_name, transform in _iter_envelope(data):
+        for face in _ci_get(model, "faceList") or []:
             face_index = -1
             if face_pids is not None:
                 pid = _ci_get(face, "persistentID")
                 face_index = len(face_pids)
                 face_pids.append(
-                    str(pid) if pid is not None else f"_{face_index}"
-                )
+                    str(pid) if pid is not None else f"_{face_index}")
             _emit_face(
-                face, identity, all_vertices, all_faces, vertex_offset,
-                cell_face_index=cell_face_index, face_index=face_index,
-            )
+                face, transform, all_vertices, all_faces, vertex_offset,
+                cell_face_index=cell_face_index, face_index=face_index)
 
     if not all_vertices:
         raise ValueError("No valid geometry found in data")
@@ -256,47 +262,10 @@ def enumerate_part_labels(data: Dict[str, Any]) -> List[str]:
     Returns an empty list when ``data`` has no parts with geometry.
     """
     labels: List[str] = []
-    label_counts: Dict[str, int] = {}
-
-    def _label_for(model: Dict[str, Any], component_name: Any = None) -> str:
-        # Prefer the per-instance component name from the parent's
-        # childComponents entry; instanced (deduped) parts share one model
-        # whose own name can't tell the instances apart.
-        name = (
-            component_name
-            or _ci_get(model, "componentName")
-            or _ci_get(model, "modelName")
-            or "part"
-        )
-        name = str(name)
-        label_counts[name] = label_counts.get(name, 0) + 1
-        n = label_counts[name]
-        return name if n == 1 else f"{name} #{n}"
-
-    def _walk(models, model_index, visited, component_name=None):
-        if model_index in visited:
-            return
-        visited = visited | {model_index}
-        model = models[model_index]
+    counts: Dict[str, int] = {}
+    for model, component_name, _transform in _iter_envelope(data):
         if _ci_get(model, "faceList"):
-            labels.append(_label_for(model, component_name))
-        for component in _ci_get(model, "childComponents") or []:
-            child_index = int(_ci_get(component, "childIndex", 0) or 0)
-            if child_index < 0 or child_index >= len(models):
-                continue
-            _walk(
-                models, child_index, visited,
-                _ci_get(component, "componentName"),
-            )
-
-    models = _ci_get(data, "models")
-    if isinstance(models, list) and models:
-        root_index = int(_ci_get(data, "rootIndex", 0) or 0)
-        if 0 <= root_index < len(models):
-            _walk(models, root_index, visited=set())
-    elif _ci_get(data, "faceList"):
-        labels.append(_label_for(data))
-
+            labels.append(_label_for(model, component_name, counts))
     return labels
 
 
@@ -324,119 +293,18 @@ def create_polydatas_per_part(
         ValueError: If no valid geometry is found in the data.
     """
     parts: List[tuple] = []
-    label_counts: Dict[str, int] = {}
-    global_face_counter = [0]
-    # Topological vertices are numbered globally in the same traversal order
-    # as faces (V0, V1, …) so they line up with the mesher's flat Gmsh
-    # vertex-tag enumeration after STEP import — the same assumption faces
-    # rely on via global_face_counter.
-    global_vertex_counter = [0]
+    counts: Dict[str, int] = {}
+    # Faces and topological vertices are numbered globally in traversal order
+    # (F0/F1.. , V0/V1..) so they line up with the mesher's flat Gmsh tag
+    # enumeration after STEP import.
+    face_counter = [0]
+    vertex_counter = [0]
 
-    def _label_for(model: Dict[str, Any], component_name: Any = None) -> str:
-        # Prefer the per-instance component name from the parent's
-        # childComponents entry; instanced (deduped) parts share one model
-        # whose own name can't tell the instances apart.
-        name = (
-            component_name
-            or _ci_get(model, "componentName")
-            or _ci_get(model, "modelName")
-            or "part"
-        )
-        name = str(name)
-        label_counts[name] = label_counts.get(name, 0) + 1
-        n = label_counts[name]
-        return name if n == 1 else f"{name} #{n}"
-
-    def _emit_part(
-        model: Dict[str, Any], transform: List[float],
-        component_name: Any = None,
-    ) -> None:
-        face_list = _ci_get(model, "faceList") or []
-        if not face_list:
-            return
-
-        all_vertices: List[List[float]] = []
-        all_faces: List[int] = []
-        vertex_offset: List[int] = [0]
-        cell_face_index: Optional[List[int]] = [] if with_face_index else None
-        face_pids: Optional[List[str]] = [] if with_face_index else None
-
-        for face in face_list:
-            face_index = -1
-            if face_pids is not None:
-                face_index = len(face_pids)
-                face_pids.append(f"F{global_face_counter[0]}")
-                global_face_counter[0] += 1
-            _emit_face(
-                face, transform, all_vertices, all_faces, vertex_offset,
-                cell_face_index=cell_face_index, face_index=face_index,
-            )
-
-        if not all_vertices:
-            return
-
-        vertices = np.array(all_vertices, dtype=np.float64)
-        faces = np.array(all_faces, dtype=np.int64)
-        mesh = pv.PolyData(vertices, faces)
-        mesh.compute_normals(inplace=True)
-        if with_face_index and cell_face_index is not None:
-            mesh.cell_data["face_index"] = np.asarray(
-                cell_face_index, dtype=np.int32,
-            )
-            mesh.field_data["face_pids"] = np.asarray(face_pids, dtype=object)
-            # Stash this part's topological vertices (corner points, not the
-            # tessellation vertices above) so the vertex picker can render and
-            # pick them. Points are flattened (N*3,) and reshaped on read; the
-            # parallel vertex_pids give N and the global V{n} ids.
-            vtx_pids: List[str] = []
-            vtx_xyz: List[List[float]] = []
-            for vtx in _ci_get(model, "vertexList") or []:
-                loc = _ci_get(vtx, "location")
-                if not loc or len(loc) != 3:
-                    continue
-                vtx_pids.append(f"V{global_vertex_counter[0]}")
-                global_vertex_counter[0] += 1
-                vtx_xyz.append([float(loc[0]), float(loc[1]), float(loc[2])])
-            if vtx_xyz:
-                pts_world = _transform_points(
-                    np.asarray(vtx_xyz, dtype=np.float64), transform,
-                )
-                mesh.field_data["vertex_points"] = pts_world.flatten()
-                mesh.field_data["vertex_pids"] = np.asarray(
-                    vtx_pids, dtype=object,
-                )
-
-        parts.append((_label_for(model, component_name), mesh))
-
-    def _walk(models, model_index, transform, visited, component_name=None):
-        if model_index in visited:
-            return
-        visited = visited | {model_index}
-        model = models[model_index]
-        _emit_part(model, transform, component_name)
-        for component in _ci_get(model, "childComponents") or []:
-            child_index = int(_ci_get(component, "childIndex", 0) or 0)
-            if child_index < 0 or child_index >= len(models):
-                continue
-            child_local = (
-                _ci_get(component, "transformToParent") or _identity_matrix()
-            )
-            child_world = _matmul4(transform, child_local)
-            _walk(
-                models, child_index, child_world, visited,
-                _ci_get(component, "componentName"),
-            )
-
-    models = _ci_get(data, "models")
-    if isinstance(models, list) and models:
-        root_index = int(_ci_get(data, "rootIndex", 0) or 0)
-        if root_index < 0 or root_index >= len(models):
-            raise ValueError(
-                f"rootIndex {root_index} out of range (0..{len(models) - 1})"
-            )
-        _walk(models, root_index, _identity_matrix(), visited=set())
-    else:
-        _emit_part(data, _identity_matrix())
+    for model, component_name, transform in _iter_envelope(data):
+        mesh = _emit_part(model, transform, face_counter, vertex_counter,
+                          with_face_index)
+        if mesh is not None:
+            parts.append((_label_for(model, component_name, counts), mesh))
 
     if not parts:
         raise ValueError("No valid geometry found in data")
