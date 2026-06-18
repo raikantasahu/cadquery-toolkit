@@ -1096,8 +1096,13 @@ class GmshMesher:
         if spec.fine_size <= 0 or spec.radius <= 0:
             raise MeshValidationError(
                 "refinement fine_size and radius must be positive.")
-        near = self._points_near(spec.at)
-        if not near:
+        from .resolver import EntityResolutionError
+
+        # Anchor by coordinate via the shared geometric resolver (namespace-
+        # independent; returns the whole coincident set, one vertex per body).
+        try:
+            near = self._resolver.resolve_vertex(spec.at)
+        except EntityResolutionError:
             raise MeshValidationError(
                 f"refinement anchor {tuple(spec.at)} matches no model vertex.")
 
@@ -1114,15 +1119,17 @@ class GmshMesher:
                         f"refinement part_index {spec.part_index} out of range "
                         f"(0..{len(vols) - 1}).")
                 target_vol = vols[spec.part_index][1]
-                points = [p for p in near
-                          if self._volume_of_point(p) == target_vol]
-                if not points:
+                try:
+                    points = self._resolver.resolve_vertex(
+                        spec.at, volume=target_vol)
+                except EntityResolutionError:
                     raise MeshValidationError(
                         f"refinement anchor {tuple(spec.at)} has no vertex on "
                         f"part {spec.part_index}.")
             else:
                 points = near[:1]
-                target_vol = self._volume_of_point(points[0])
+                target_vol = next(
+                    iter(self._resolver.volumes_of_vertex(points[0])), None)
         else:
             raise MeshValidationError(
                 f"refinement scope must be 'local' or 'contact', "
@@ -1147,35 +1154,6 @@ class GmshMesher:
         gmsh.model.mesh.field.setNumber(fr, "InField", ft)
         gmsh.model.mesh.field.setNumbers(fr, "VolumesList", [target_vol])
         return fr
-
-    @staticmethod
-    def _points_near(xyz) -> List[int]:
-        """All model point tags within tolerance of coordinate ``xyz``.
-
-        Anchoring by coordinate is namespace-independent: it sidesteps the
-        mismatch between the CAD vertex picker's ordering and gmsh's import
-        ordering, and naturally returns the whole coincident set at a shared
-        location (one vertex per touching body).
-        """
-        bb = gmsh.model.getBoundingBox(-1, -1)
-        diag = math.sqrt(sum((bb[i + 3] - bb[i]) ** 2 for i in range(3)))
-        tol = max(1e-9, diag * 1e-6)
-        out = []
-        for _, t in gmsh.model.getEntities(0):
-            c = gmsh.model.getValue(0, t, [])
-            if math.sqrt(sum((c[i] - xyz[i]) ** 2 for i in range(3))) <= tol:
-                out.append(t)
-        return out
-
-    @staticmethod
-    def _volume_of_point(ptag: int) -> Optional[int]:
-        """The volume tag whose boundary contains point ``ptag`` (else None)."""
-        for _, vol in gmsh.model.getEntities(3):
-            pts = {abs(t) for d, t in gmsh.model.getBoundary(
-                [(3, vol)], oriented=False, recursive=True) if d == 0}
-            if ptag in pts:
-                return vol
-        return None
 
     # All hex types share the recombine-from-tet-subdivision path and the
     # same curvature-under-resolution failure mode (verified for HEX8/20/27).

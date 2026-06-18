@@ -153,6 +153,14 @@ class GeometricResolver:
                 f"no part near centroid {tuple(centroid)}")
         return sorted(cands)
 
+    def volumes_of_vertex(self, point_tag):
+        """Volume tags whose boundary includes the given gmsh point tag.
+
+        Precomputed once (unlike a per-call getBoundary scan); used to confine a
+        local refinement to the part its anchor vertex belongs to.
+        """
+        return set(self._pt_to_vols.get(point_tag, set()))
+
     def build_owner_map(self, selections):
         """Resolve geometric selections to a ``{(dim, tag): owner}`` map.
 
