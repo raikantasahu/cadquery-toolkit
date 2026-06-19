@@ -9,6 +9,8 @@ Usage:
     viewer.show_viewer()
 """
 
+import os
+
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import GObject, GLib
@@ -27,7 +29,10 @@ from model.tessellation import (
 
 DEFAULT_COLOR = '#667eea'
 VOLUMETRIC_COLOR = '#4fc3f7'
-BACKGROUND_COLOR = '#1a1a1a'
+# Viewer scene background. Defaults to a near-black dark grey; override with the
+# VIEWER_BACKGROUND_COLOR env var (any pyvista-accepted color name or hex, e.g.
+# VIEWER_BACKGROUND_COLOR=white). Read once at import, so set it before launch.
+BACKGROUND_COLOR = os.environ.get('VIEWER_BACKGROUND_COLOR', '#1a1a1a')
 PICK_HIGHLIGHT_COLOR = '#ffeb3b'
 
 
