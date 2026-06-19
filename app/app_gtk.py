@@ -172,7 +172,6 @@ class CadQueryApp(Gtk.Window):
         # assemblies). The "active" builder — used by all menu callbacks —
         # is whichever notebook page is currently visible.
         self.notebook = Gtk.Notebook()
-        self.notebook.connect('switch-page', self._on_tab_switched)
 
         self.parts_builder = ModelBuilder(
             model_functions=get_all_parts(), kind_label="Part",
@@ -226,6 +225,16 @@ class CadQueryApp(Gtk.Window):
         shortcuts_label.set_halign(Gtk.Align.START)
         shortcuts_label.set_margin_top(5)
         vbox.pack_start(shortcuts_label, False, False, 0)
+
+        # Connect the tab-switch handler only AFTER the pages and status_label
+        # exist. append_page() emits 'switch-page' during construction, and the
+        # handler restores the new tab's status via self.status_label + re-syncs
+        # menus; connecting before line creating status_label ran it too early
+        # (AttributeError on self.status_label, swallowed by GTK and printed to
+        # stderr). Do the initial menu-sensitivity sync explicitly here instead
+        # of relying on those construction-time emissions.
+        self.notebook.connect('switch-page', self._on_tab_switched)
+        self._sync_menu_sensitivity()
 
     # --- Active-builder helpers ---
 
