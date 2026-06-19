@@ -109,13 +109,22 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
             lines.append(f"  {label}  [{pid}]")
         return "\n".join(lines)
 
-    text_actor = plotter.add_text(
+    _OVERLAY_NAME = 'face_pick_overlay'
+    plotter.add_text(
         _overlay_text(), position='upper_right', font_size=10,
-        color='yellow', shadow=True,
+        color='yellow', shadow=True, name=_OVERLAY_NAME,
     )
 
     def _refresh_overlay():
-        text_actor.SetInput(_overlay_text())
+        # Update by re-adding under the same name. add_text(position=<corner>)
+        # returns a vtkCornerAnnotation, whose text is set via SetText(corner,
+        # ...) — NOT SetInput(...), which only exists on vtkTextActor. Re-adding
+        # by name replaces the actor without depending on the corner index or
+        # the actor's VTK type across pyvista/VTK versions.
+        plotter.add_text(
+            _overlay_text(), position='upper_right', font_size=10,
+            color='yellow', shadow=True, name=_OVERLAY_NAME,
+        )
         plotter.render()
 
     def _add_highlight(actor, face_idx: int, pid: str, label: str) -> bool:
@@ -241,13 +250,20 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
             lines.append(f"  {label}  [{pid}]")
         return "\n".join(lines)
 
-    text_actor = plotter.add_text(
+    _OVERLAY_NAME = 'vertex_pick_overlay'
+    plotter.add_text(
         _overlay_text(), position='upper_right', font_size=10,
-        color='yellow', shadow=True,
+        color='yellow', shadow=True, name=_OVERLAY_NAME,
     )
 
     def _refresh_overlay():
-        text_actor.SetInput(_overlay_text())
+        # Re-add by name to update — see the note in _setup_multi_face_picking:
+        # add_text returns a vtkCornerAnnotation (no SetInput); replacing by
+        # name is the version-robust way to refresh the overlay text.
+        plotter.add_text(
+            _overlay_text(), position='upper_right', font_size=10,
+            color='yellow', shadow=True, name=_OVERLAY_NAME,
+        )
         plotter.render()
 
     def _add_highlight(actor, vidx: int, pid: str, label: str) -> bool:
