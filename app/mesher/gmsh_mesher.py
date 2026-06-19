@@ -419,7 +419,10 @@ class GmshMesher:
 
     def __init__(self, cadquery_object, model_name: str = "model"):
         if not HAS_GMSH:
-            raise RuntimeError(
+            # ImportError (a missing dependency), matching the converter's
+            # cadquery/FreeCAD guards — one exception type for "dep not
+            # installed" across the app (Architecture-Review T3 dep-flag nit).
+            raise ImportError(
                 "Gmsh is not installed. Install it with: pip install gmsh"
             )
         self.cq_object = cadquery_object
