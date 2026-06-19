@@ -32,6 +32,30 @@ def test_set_model_then_model_data(fixtures):
     assert core.model_data() is core.model_data()
 
 
+def test_set_model_short_circuits_on_unchanged_reset(fixtures):
+    """Re-setting the SAME model object (the imported-STEP panel does this on
+    every menu action) preserves the CADModelData cache; a different model or a
+    changed name invalidates it."""
+    core = AppCore()
+    model = fixtures["hertz"]["model"]
+    core.set_model(model, "hertz")
+    md = core.model_data()
+
+    # Same object + same name: cache survives (no rebuild).
+    core.set_model(model, "hertz")
+    assert core.model_data() is md
+
+    # A changed name is a real change: cache is rebuilt.
+    core.set_model(model, "renamed")
+    assert core.model_data() is not md
+
+    # A different model object: cache is rebuilt.
+    other = fixtures["twocubes"]["model"]
+    rebuilt = core.model_data()
+    core.set_model(other, "twocubes")
+    assert core.model_data() is not rebuilt
+
+
 def test_build_model_from_registry():
     core = AppCore()
     core.build_model("hemisphere_sector", {}, kind="part")

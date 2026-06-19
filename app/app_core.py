@@ -47,9 +47,21 @@ class AppCore:
 
     # ---------- model lifecycle ----------
     def set_model(self, model, name, parameters=None, param_signature=None):
-        """Load an already-built model (the GUI path: ModelBuilder built it)."""
+        """Load an already-built model (the GUI path: ModelBuilder built it).
+
+        Short-circuits when the *same* model object is re-set with unchanged
+        name/params/signature: the imported-STEP panel re-sets its one stable
+        cached model on every menu action, so without this the CADModelData
+        cache would be rebuilt each time. A registry builder hands a fresh model
+        object on every build, so its cache is invalidated exactly as before.
+        """
+        name = name or "model"
+        if (model is self._model and name == self._name
+                and parameters == self._params
+                and param_signature == self._sig):
+            return
         self._model = model
-        self._name = name or "model"
+        self._name = name
         self._params = parameters
         self._sig = param_signature
         self._model_data = None            # invalidate cache
