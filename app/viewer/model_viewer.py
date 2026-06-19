@@ -57,7 +57,46 @@ def _vtk_interactor(plotter):
     return getattr(iren, 'interactor', iren)
 
 
-def _setup_multi_face_picking(plotter, part_entries, pick_state):
+def _on_left_click(plotter, callback, drag_tol=5):
+    """Invoke ``callback(x, y)`` on a left *click* that is not a camera drag.
+
+    Picking fires on a left click (press + release at ~the same spot); a left
+    *drag* still rotates the camera. We record the press position and, on
+    release, only call back when the pointer moved <= ``drag_tol`` pixels — so
+    selection and trackball rotation share the left button. Observers never
+    abort the event, so VTK's built-in rotate runs unchanged.
+
+    Two pyvista-specific details (a raw vtk ``AddObserver`` here picks nothing):
+    register through ``plotter.iren.add_observer`` so the LeftButtonRelease is
+    routed onto the interactor STYLE — the raw interactor swallows release, so a
+    raw observer never fires; and read the event position from the raw
+    interactor, because the release callback's ``caller`` is then the style,
+    which has no ``GetEventPosition``.
+
+    Replaces key-triggered picking ('p'), whose keypress collided with VTK's
+    built-in char shortcuts (the 'p'/'f' handlers that logged "no current
+    renderer on the interactor style").
+    """
+    iren = plotter.iren
+    raw = _vtk_interactor(plotter)
+    press_xy = [None]
+
+    def _press(*_):
+        press_xy[0] = raw.GetEventPosition()
+
+    def _release(*_):
+        start, press_xy[0] = press_xy[0], None
+        if start is None:
+            return
+        x, y = raw.GetEventPosition()
+        if abs(x - start[0]) <= drag_tol and abs(y - start[1]) <= drag_tol:
+            callback(x, y)
+
+    iren.add_observer('LeftButtonPressEvent', _press)
+    iren.add_observer('LeftButtonReleaseEvent', _release)
+
+
+def _setup_multi_face_picking(plotter, part_entries, pick_state, single=False):
     """Wire up face picking across multiple part actors.
 
     Args:
@@ -66,9 +105,12 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
             currently shown. Each ``mesh`` must carry ``face_index``
             cell_data and ``face_pids`` field_data.
         pick_state: Dict with ``picks`` list of ``(pid, label)``.
+        single: When True, only one face may be selected at a time — picking a
+            different face replaces the previous selection (for the cap face).
+            When False (default), picks accumulate and each toggles.
 
-    User presses 'p' with the cursor over a face to toggle the face under
-    the cursor. Only cells of visible actors are picked (VTK's
+    User left-clicks a face to toggle the face under the cursor (a left drag
+    rotates the camera instead). Only cells of visible actors are picked (VTK's
     vtkCellPicker honors actor visibility), so hiding a part via its
     checkbox effectively excludes it from the pick.
     """
@@ -101,10 +143,16 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
 
     def _overlay_text() -> str:
         if not pick_state['picks']:
-            return ("Face picker: 'p' over a face to pick/unpick.\n"
+            if single:
+                return ("Face picker: left-click a face to select.\n"
+                        "Picking another face replaces the selection.\n"
+                        "No face selected yet.")
+            return ("Face picker: left-click a face to pick/unpick.\n"
                     "Use the checkboxes on the left to hide/show parts.\n"
                     "No faces picked yet.")
-        lines = ["Picked faces ('p' to toggle):"]
+        header = ("Selected face (left-click another to replace):" if single
+                  else "Picked faces (left-click to toggle):")
+        lines = [header]
         for pid, label in pick_state['picks']:
             lines.append(f"  {label}  [{pid}]")
         return "\n".join(lines)
@@ -159,26 +207,34 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
         pid_to_actors[pid] = (sub_actor, label_name)
         return True
 
+    def _remove_pick(pid: str) -> None:
+        sub_actor, label_name = pid_to_actors.pop(pid)
+        plotter.remove_actor(sub_actor)
+        plotter.remove_actor(label_name)
+        pick_state['picks'] = [
+            (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
+        ]
+
     def _toggle(actor, face_idx: int) -> None:
         info = actor_lookup.get(actor)
         if info is None:
             return
-        cell_face_index, face_pids, _mesh = info
+        _cell_face_index, face_pids, _mesh = info
         if face_idx < 0 or face_idx >= len(face_pids):
             return
         pid = face_pids[face_idx]
         if pid in pid_to_actors:
-            sub_actor, label_name = pid_to_actors.pop(pid)
-            plotter.remove_actor(sub_actor)
-            plotter.remove_actor(label_name)
-            pick_state['picks'] = [
-                (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
-            ]
+            _remove_pick(pid)               # click the current pick -> deselect
         else:
-            label = f"Face {next_pick_n[0]}"
+            if single:
+                # One face at a time: a new pick replaces the previous one.
+                for prev in list(pid_to_actors):
+                    _remove_pick(prev)
+            label = "Face 1" if single else f"Face {next_pick_n[0]}"
             if not _add_highlight(actor, face_idx, pid, label):
                 return
-            next_pick_n[0] += 1
+            if not single:
+                next_pick_n[0] += 1
             pick_state['picks'].append((pid, label))
         _refresh_overlay()
 
@@ -194,8 +250,7 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
             actor, idx = loc
             _add_highlight(actor, idx, pid, label)
 
-    def _on_pick_key():
-        x, y = _vtk_interactor(plotter).GetEventPosition()
+    def _on_pick_click(x, y):
         picker.Pick(x, y, 0, plotter.renderer)
         cell_id = picker.GetCellId()
         if cell_id < 0:
@@ -206,15 +261,16 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state):
         cell_face_index, _pids, _mesh = actor_lookup[actor]
         _toggle(actor, int(cell_face_index[cell_id]))
 
-    plotter.add_key_event('p', _on_pick_key)
+    _on_left_click(plotter, _on_pick_click)
 
 
-def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
+def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state,
+                                single=False):
     """Wire up vertex picking across multiple part point-cloud actors.
 
     Mirror of ``_setup_multi_face_picking`` for topological vertices: each
     part contributes a points actor with one VTK point per CAD vertex. The
-    user presses 'p' with the cursor over a vertex to toggle it; a
+    user left-clicks a vertex to toggle it (a left drag rotates the camera); a
     vtkPointPicker maps the click to the nearest point id, which indexes the
     parallel ``vertex_pids`` list. Picks accumulate as ``(pid, label)`` in
     ``pick_state['picks']`` with auto labels ``Vertex N``.
@@ -225,6 +281,9 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
             ``points`` is an (N,3) ndarray and ``vertex_pids`` the parallel
             ``V{n}`` id list.
         pick_state: Dict with a ``picks`` list of ``(pid, label)``.
+        single: When True, only one vertex may be selected at a time — picking
+            a different vertex replaces the previous selection (for the
+            refinement anchor). When False (default), picks accumulate.
     """
     import vtk
 
@@ -242,10 +301,16 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
 
     def _overlay_text() -> str:
         if not pick_state['picks']:
-            return ("Vertex picker: 'p' over a vertex to pick/unpick.\n"
+            if single:
+                return ("Vertex picker: left-click a vertex to select.\n"
+                        "Picking another vertex replaces the selection.\n"
+                        "No vertex selected yet.")
+            return ("Vertex picker: left-click a vertex to pick/unpick.\n"
                     "Use the checkboxes on the left to hide/show parts.\n"
                     "No vertices picked yet.")
-        lines = ["Picked vertices ('p' to toggle):"]
+        header = ("Selected vertex (left-click another to replace):" if single
+                  else "Picked vertices (left-click to toggle):")
+        lines = [header]
         for pid, label in pick_state['picks']:
             lines.append(f"  {label}  [{pid}]")
         return "\n".join(lines)
@@ -296,6 +361,14 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
         pid_to_actors[pid] = (sub_actor, label_name)
         return True
 
+    def _remove_pick(pid: str) -> None:
+        sub_actor, label_name = pid_to_actors.pop(pid)
+        plotter.remove_actor(sub_actor)
+        plotter.remove_actor(label_name)
+        pick_state['picks'] = [
+            (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
+        ]
+
     def _toggle(actor, vidx: int) -> None:
         info = actor_lookup.get(actor)
         if info is None:
@@ -305,17 +378,17 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
             return
         pid = vpids[vidx]
         if pid in pid_to_actors:
-            sub_actor, label_name = pid_to_actors.pop(pid)
-            plotter.remove_actor(sub_actor)
-            plotter.remove_actor(label_name)
-            pick_state['picks'] = [
-                (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
-            ]
+            _remove_pick(pid)               # click the current pick -> deselect
         else:
-            label = f"Vertex {next_pick_n[0]}"
+            if single:
+                # One vertex at a time: a new pick replaces the previous one.
+                for prev in list(pid_to_actors):
+                    _remove_pick(prev)
+            label = "Vertex 1" if single else f"Vertex {next_pick_n[0]}"
             if not _add_highlight(actor, vidx, pid, label):
                 return
-            next_pick_n[0] += 1
+            if not single:
+                next_pick_n[0] += 1
             pick_state['picks'].append((pid, label))
         _refresh_overlay()
 
@@ -331,8 +404,7 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
             actor, idx = loc
             _add_highlight(actor, idx, pid, label)
 
-    def _on_pick_key():
-        x, y = _vtk_interactor(plotter).GetEventPosition()
+    def _on_pick_click(x, y):
         picker.Pick(x, y, 0, plotter.renderer)
         point_id = picker.GetPointId()
         if point_id < 0:
@@ -342,7 +414,7 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state):
             return
         _toggle(actor, int(point_id))
 
-    plotter.add_key_event('p', _on_pick_key)
+    _on_left_click(plotter, _on_pick_click)
 
 
 def _add_visibility_checkboxes(plotter, part_entries,
@@ -397,7 +469,7 @@ def _add_visibility_checkboxes(plotter, part_entries,
 
 
 def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
-                     pick_mode="faces"):
+                     pick_mode="faces", single=False):
     """Open a PyVista viewer with per-part actors, visibility toggles, and
     face or vertex picking.
 
@@ -411,7 +483,7 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
         pick_mode: ``"faces"`` (default) picks CAD faces; ``"vertices"``
             renders each part's topological vertices as a pickable point
             cloud (faces become non-pickable context) and picks those. In
-            both modes the pick key is ``'p'``.
+            both modes a left-click toggles the entity under the cursor.
 
     This is a blocking call — it returns when the viewer window is closed.
     """
@@ -526,9 +598,11 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
     )
 
     if pick_state is not None and pick_mode == "vertices":
-        _setup_multi_vertex_picking(plotter, vertex_entries, pick_state)
+        _setup_multi_vertex_picking(plotter, vertex_entries, pick_state,
+                                    single=single)
     elif pick_state is not None:
-        _setup_multi_face_picking(plotter, part_entries, pick_state)
+        _setup_multi_face_picking(plotter, part_entries, pick_state,
+                                  single=single)
 
     pick_help = "P=Pick vertex" if pick_mode == "vertices" else "P=Pick face"
     plotter.add_text(
@@ -776,7 +850,8 @@ class ModelViewer(GObject.Object):
     def show_viewer(self, title: str = "CAD Model Viewer",
                     pick_faces: bool = False,
                     initial_picks: Optional[List[tuple]] = None,
-                    pick_mode: str = "faces") -> None:
+                    pick_mode: str = "faces",
+                    single: bool = False) -> None:
         """
         Open the 3D viewer window.
 
@@ -791,6 +866,8 @@ class ModelViewer(GObject.Object):
                 pre-populate; only respected when ``pick_faces`` is True.
             pick_mode: ``"faces"`` (default) or ``"vertices"`` — which entity
                 type to pick. Only meaningful when ``pick_faces`` is True.
+            single: When True, restrict picking to one entity at a time (a new
+                pick replaces the previous). Only meaningful when ``pick_faces``.
         """
         if self._mesh is None and self._parts is None:
             self.emit('error', "No mesh loaded. Call set_mesh_from_dict() first.")
@@ -806,7 +883,7 @@ class ModelViewer(GObject.Object):
             if pick_faces and self._parts is not None:
                 show_pick_viewer(
                     self._parts, title=title, pick_state=pick_state,
-                    pick_mode=pick_mode,
+                    pick_mode=pick_mode, single=single,
                 )
             else:
                 show_pyvista(

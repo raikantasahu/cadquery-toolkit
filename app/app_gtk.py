@@ -351,7 +351,7 @@ class CadQueryApp(Gtk.Window):
             pick_mode="faces",
             title="Pick Faces",
             status_text=(
-                "Face picker open — press 'p' over a face to pick/unpick. "
+                "Face picker open — left-click a face to pick/unpick. "
                 "Close window when done."
             ),
             initial_picks=self._picked_faces,
@@ -364,7 +364,7 @@ class CadQueryApp(Gtk.Window):
             pick_mode="vertices",
             title="Pick Vertices",
             status_text=(
-                "Vertex picker open — press 'p' over a vertex to pick/unpick. "
+                "Vertex picker open — left-click a vertex to pick/unpick. "
                 "Close window when done."
             ),
             initial_picks=self._picked_vertices,

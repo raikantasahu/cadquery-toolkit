@@ -71,6 +71,7 @@ def pick_entities(parent, model_data, kind="face", single=True,
             pick_faces=True,
             pick_mode=_PICK_MODES[kind],
             initial_picks=list(initial or []),
+            single=single,
         )
     finally:
         if parent is not None:
