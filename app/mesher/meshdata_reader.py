@@ -53,6 +53,12 @@ def meshdata_to_pyvista(data: dict) -> pv.UnstructuredGrid:
             — the shape produced by
             :func:`mesher.export.meshdata_json_exporter.save_as_meshdata_json`.
 
+    Each cell is tagged with its part in ``cell_data["part_index"]`` (the index
+    of its fragment's ``owner`` among the distinct owners), and the distinct
+    owners go in ``field_data["part_labels"]`` — so the viewer can hide/show each
+    part independently. Fragments that share an owner but differ by element type
+    collapse to one part (keyed by owner, not by fragment).
+
     Returns:
         pv.UnstructuredGrid containing the volumetric mesh.
 
@@ -74,6 +80,9 @@ def meshdata_to_pyvista(data: dict) -> pv.UnstructuredGrid:
 
     cells: list = []
     celltypes: list = []
+    part_index: list = []
+    owner_to_part: dict = {}
+    part_labels: list = []
 
     for frag in data.get("fragments", []):
         type_name = frag.get("elementType")
@@ -82,6 +91,12 @@ def meshdata_to_pyvista(data: dict) -> pv.UnstructuredGrid:
             continue
         reorder = _NODE_ORDER_GMSH_TO_VTK.get(type_name)
 
+        owner = frag.get("owner", "")
+        if owner not in owner_to_part:
+            owner_to_part[owner] = len(part_labels)
+            part_labels.append(owner)
+        pidx = owner_to_part[owner]
+
         for elem in frag.get("elements", []):
             indices = [tag_to_index[int(n)] for n in elem["nodes"]]
             if reorder is not None:
@@ -89,13 +104,17 @@ def meshdata_to_pyvista(data: dict) -> pv.UnstructuredGrid:
             cells.append(len(indices))
             cells.extend(indices)
             celltypes.append(vtk_type)
+            part_index.append(pidx)
 
     if not celltypes:
         raise ValueError("MeshData has no supported volumetric elements")
 
     cells_arr = np.array(cells, dtype=np.int64)
     celltypes_arr = np.array(celltypes, dtype=np.uint8)
-    return pv.UnstructuredGrid(cells_arr, celltypes_arr, points)
+    grid = pv.UnstructuredGrid(cells_arr, celltypes_arr, points)
+    grid.cell_data["part_index"] = np.array(part_index, dtype=np.int32)
+    grid.field_data["part_labels"] = np.asarray(part_labels, dtype=object)
+    return grid
 
 
 def meshdata_xml_to_dict(path: str) -> dict:

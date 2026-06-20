@@ -335,15 +335,53 @@ def save_mesh_meshdata_xml(mesher, filename, owner=None, entity_owners=None):
     )
 
 
-def gmsh_to_pyvista() -> pv.UnstructuredGrid:
+def _resolve_part_labels(part_labels, num_volumes):
+    """Per-part labels for the rendered grid — exactly one per gmsh volume.
+
+    ``part_labels`` (e.g. the assembly child names from ``enumerate_part_labels``)
+    is used as given when it has one entry per volume. A length mismatch is a
+    contract violation — the label list must line up with the volumes that
+    ``part_index`` ranges over — so it is reported **loudly** and we fall back to
+    a synthesized ``Part 1..N`` rather than mislabel parts silently. ``None``
+    (no labels available, e.g. an imported STEP) also yields the fallback.
+    """
+    fallback = [f"Part {i + 1}" for i in range(num_volumes)]
+    if part_labels is None:
+        return fallback
+    labels = [str(p) for p in part_labels]
+    if len(labels) != num_volumes:
+        logger.warning(
+            "PART LABEL MISMATCH: got %d part label(s) %r for %d gmsh "
+            "volume(s) — the label list does not line up with the mesh's "
+            "parts; falling back to 'Part 1..N'. Fix the caller "
+            "(enumerate_part_labels must yield one label per instance/volume).",
+            len(labels), labels, num_volumes)
+        return fallback
+    return labels
+
+
+def gmsh_to_pyvista(part_labels=None) -> pv.UnstructuredGrid:
     """Extract the current Gmsh model mesh as a PyVista UnstructuredGrid.
 
     Reads nodes and 3D elements from the active Gmsh session, maps Gmsh
     element types to VTK cell types, and applies node reordering where
     needed (tet10/hex20/hex27).
 
+    Elements are read **per volume** (``getEntities(dim=3)`` then
+    ``getElements(3, tag)``), so each cell carries its 0-based volume ordinal in
+    ``cell_data["part_index"]`` — this is what lets the viewer hide/show an
+    assembly's parts independently. The matching per-part names go in
+    ``field_data["part_labels"]`` (``part_labels`` when it has one entry per
+    volume, else a synthesized ``Part 1..N``; see :func:`_resolve_part_labels`).
+    Cells are grouped by volume; the total cell count and each element's
+    connectivity are unchanged from a flat read.
+
     Must be called while Gmsh is initialized and a mesh has been generated
     or loaded (before ``gmsh.finalize()``).
+
+    Args:
+        part_labels: Optional ordered part names, one per gmsh volume (in volume
+            order == assembly order). Used for ``field_data["part_labels"]``.
 
     Returns:
         pv.UnstructuredGrid containing the volumetric mesh.
@@ -353,36 +391,44 @@ def gmsh_to_pyvista() -> pv.UnstructuredGrid:
 
     tag_to_index = {int(tag): idx for idx, tag in enumerate(node_tags)}
 
-    elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
+    volumes = gmsh.model.getEntities(dim=3)
+    labels = _resolve_part_labels(part_labels, len(volumes))
 
     cells = []
     celltypes = []
+    part_index = []
 
-    for etype, node_tags_per_type in zip(elem_types, elem_node_tags):
-        vtk_type = _GMSH_TO_VTK.get(int(etype))
-        if vtk_type is None:
-            continue
+    for part_i, (_dim, vol_tag) in enumerate(volumes):
+        elem_types, _, elem_node_tags = gmsh.model.mesh.getElements(3, vol_tag)
+        for etype, node_tags_per_type in zip(elem_types, elem_node_tags):
+            vtk_type = _GMSH_TO_VTK.get(int(etype))
+            if vtk_type is None:
+                continue
 
-        props = gmsh.model.mesh.getElementProperties(int(etype))
-        nodes_per_elem = props[3]
-        node_order = _GMSH_TO_VTK_NODE_ORDER.get(int(etype))
+            props = gmsh.model.mesh.getElementProperties(int(etype))
+            nodes_per_elem = props[3]
+            node_order = _GMSH_TO_VTK_NODE_ORDER.get(int(etype))
 
-        node_arr = np.array(node_tags_per_type, dtype=np.int64)
-        num_elems = len(node_arr) // nodes_per_elem
+            node_arr = np.array(node_tags_per_type, dtype=np.int64)
+            num_elems = len(node_arr) // nodes_per_elem
 
-        for i in range(num_elems):
-            elem_nodes = node_arr[i * nodes_per_elem:(i + 1) * nodes_per_elem]
-            indices = [tag_to_index[int(t)] for t in elem_nodes]
-            if node_order is not None:
-                indices = [indices[j] for j in node_order]
-            cells.append(len(indices))
-            cells.extend(indices)
-            celltypes.append(vtk_type)
+            for i in range(num_elems):
+                elem_nodes = node_arr[i * nodes_per_elem:(i + 1) * nodes_per_elem]
+                indices = [tag_to_index[int(t)] for t in elem_nodes]
+                if node_order is not None:
+                    indices = [indices[j] for j in node_order]
+                cells.append(len(indices))
+                cells.extend(indices)
+                celltypes.append(vtk_type)
+                part_index.append(part_i)
 
     cells = np.array(cells, dtype=np.int64)
     celltypes = np.array(celltypes, dtype=np.uint8)
 
-    return pv.UnstructuredGrid(cells, celltypes, coords)
+    grid = pv.UnstructuredGrid(cells, celltypes, coords)
+    grid.cell_data["part_index"] = np.array(part_index, dtype=np.int32)
+    grid.field_data["part_labels"] = np.asarray(labels, dtype=object)
+    return grid
 
 
 def generate_pyvista_mesh(model, mesh_type_str, element_size,
@@ -511,11 +557,16 @@ class GmshMesher:
         self._assert_hex_valid(MeshType.HEX8)
         return self._collect_mesh_info(MeshType.HEX8)
 
-    def get_pyvista_mesh(self) -> pv.UnstructuredGrid:
+    def get_pyvista_mesh(self, part_labels=None) -> pv.UnstructuredGrid:
         """
         Extract the generated mesh as a PyVista UnstructuredGrid.
 
         Must be called after generate() and before finalize()/save().
+
+        Args:
+            part_labels: Optional ordered part names (one per gmsh volume) tagged
+                onto the grid for the viewer's per-part hide/show. See
+                :func:`gmsh_to_pyvista`.
 
         Returns:
             pv.UnstructuredGrid containing the volumetric mesh.
@@ -523,7 +574,7 @@ class GmshMesher:
         if not self._initialized:
             raise RuntimeError("No mesh generated yet. Call generate() first.")
 
-        return gmsh_to_pyvista()
+        return gmsh_to_pyvista(part_labels=part_labels)
 
     def finalize(self) -> None:
         """Finalize Gmsh without saving. Use for view-only flows."""

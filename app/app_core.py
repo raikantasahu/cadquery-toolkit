@@ -91,6 +91,17 @@ class AppCore:
             self._model_data = md.to_dict()
         return self._model_data
 
+    def part_labels(self):
+        """Ordered per-part labels for the current model — assembly child names
+        (or the single part's name), one per solid in volume order. Tags the
+        viewer mesh so an assembly's parts can be hidden/shown by name. Returns
+        None when unavailable, so the viewer falls back to ``Part 1..N``."""
+        try:
+            labels = enumerate_part_labels(self.model_data())
+        except Exception:
+            return None
+        return labels or None
+
     def clear(self):
         self.finalize()
         self._model = None

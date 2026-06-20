@@ -23,6 +23,7 @@ from model.tessellation import (
     create_polydata_from_model_data,
     create_polydatas_per_part,
 )
+from mesh_parts import split_grid_by_part
 
 
 # ── Display constants ────────────────────────────────────────────────────────
@@ -473,6 +474,79 @@ def _add_visibility_checkboxes(plotter, part_entries,
         y += button_size + pad
 
 
+def _setup_scene(plotter, bounds):
+    """Shared viewer scaffold: grid floor, 3-light setup, axes, iso camera, and
+    the view-preset key bindings (f/b/l/g/t/u/i). Used by all three viewers
+    (``show_pyvista``, ``show_pick_viewer``, ``show_volumetric_viewer``) so the
+    scene setup stays identical; each caller adds its own help text and any
+    extra keys (e.g. wireframe).
+
+    Args:
+        plotter: The active pv.Plotter.
+        bounds: A 6-tuple ``(xmin, xmax, ymin, ymax, zmin, zmax)``.
+
+    Returns:
+        ``(center, distance)`` for any caller that needs them.
+    """
+    center = np.array([
+        (bounds[0] + bounds[1]) / 2,
+        (bounds[2] + bounds[3]) / 2,
+        (bounds[4] + bounds[5]) / 2,
+    ])
+    size = max(
+        bounds[1] - bounds[0],
+        bounds[3] - bounds[2],
+        bounds[5] - bounds[4],
+    )
+    distance = size * 2.5
+
+    grid_size = max(200, size * 4)
+    grid = pv.Plane(
+        center=(center[0], center[1], bounds[4] - size * 0.1),
+        direction=(0, 0, 1),
+        i_size=grid_size,
+        j_size=grid_size,
+        i_resolution=20,
+        j_resolution=20,
+    )
+    grid_actor = plotter.add_mesh(grid, color='#333333', style='wireframe',
+                                  line_width=1, opacity=0.5)
+    grid_actor.PickableOff()  # never let the floor steal a pick
+
+    plotter.enable_3_lights()
+    plotter.show_axes()
+    plotter.camera_position = [
+        (center[0] + distance, center[1] + distance, center[2] + distance),
+        tuple(center),
+        (0, 0, 1),
+    ]
+
+    def _view(direction):
+        positions = {
+            'front':  ((center[0], center[1] - distance, center[2]), (0, 0, 1)),
+            'back':   ((center[0], center[1] + distance, center[2]), (0, 0, 1)),
+            'left':   ((center[0] - distance, center[1], center[2]), (0, 0, 1)),
+            'right':  ((center[0] + distance, center[1], center[2]), (0, 0, 1)),
+            'top':    ((center[0], center[1], center[2] + distance), (0, 1, 0)),
+            'bottom': ((center[0], center[1], center[2] - distance), (0, 1, 0)),
+            'iso':    ((center[0] + distance, center[1] + distance,
+                        center[2] + distance), (0, 0, 1)),
+        }
+        pos, up = positions[direction]
+        plotter.camera_position = [pos, tuple(center), up]
+        plotter.render()
+
+    plotter.add_key_event('f', lambda: _view('front'))
+    plotter.add_key_event('b', lambda: _view('back'))
+    plotter.add_key_event('l', lambda: _view('left'))
+    plotter.add_key_event('g', lambda: _view('right'))
+    plotter.add_key_event('t', lambda: _view('top'))
+    plotter.add_key_event('u', lambda: _view('bottom'))
+    plotter.add_key_event('i', lambda: _view('iso'))
+
+    return center, distance
+
+
 def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
                      pick_mode="faces", single=False):
     """Open a PyVista viewer with per-part actors, visibility toggles, and
@@ -520,64 +594,7 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
             combined_bounds[4] = min(combined_bounds[4], b[4])
             combined_bounds[5] = max(combined_bounds[5], b[5])
 
-    bounds = combined_bounds or (0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
-    center = np.array([
-        (bounds[0] + bounds[1]) / 2,
-        (bounds[2] + bounds[3]) / 2,
-        (bounds[4] + bounds[5]) / 2,
-    ])
-    size = max(
-        bounds[1] - bounds[0],
-        bounds[3] - bounds[2],
-        bounds[5] - bounds[4],
-    )
-    distance = size * 2.5
-
-    grid_size = max(200, size * 4)
-    grid = pv.Plane(
-        center=(center[0], center[1], bounds[4] - size * 0.1),
-        direction=(0, 0, 1),
-        i_size=grid_size,
-        j_size=grid_size,
-        i_resolution=20,
-        j_resolution=20,
-    )
-    grid_actor = plotter.add_mesh(
-        grid, color='#333333', style='wireframe',
-        line_width=1, opacity=0.5,
-    )
-    grid_actor.PickableOff()  # don't let the floor steal picks
-
-    plotter.enable_3_lights()
-    plotter.show_axes()
-    plotter.camera_position = [
-        (center[0] + distance, center[1] + distance, center[2] + distance),
-        tuple(center),
-        (0, 0, 1),
-    ]
-
-    def _view(direction):
-        positions = {
-            'front':  ((center[0], center[1] - distance, center[2]), (0, 0, 1)),
-            'back':   ((center[0], center[1] + distance, center[2]), (0, 0, 1)),
-            'left':   ((center[0] - distance, center[1], center[2]), (0, 0, 1)),
-            'right':  ((center[0] + distance, center[1], center[2]), (0, 0, 1)),
-            'top':    ((center[0], center[1], center[2] + distance), (0, 1, 0)),
-            'bottom': ((center[0], center[1], center[2] - distance), (0, 1, 0)),
-            'iso':    ((center[0] + distance, center[1] + distance,
-                        center[2] + distance), (0, 0, 1)),
-        }
-        pos, up = positions[direction]
-        plotter.camera_position = [pos, tuple(center), up]
-        plotter.render()
-
-    plotter.add_key_event('f', lambda: _view('front'))
-    plotter.add_key_event('b', lambda: _view('back'))
-    plotter.add_key_event('l', lambda: _view('left'))
-    plotter.add_key_event('g', lambda: _view('right'))
-    plotter.add_key_event('t', lambda: _view('top'))
-    plotter.add_key_event('u', lambda: _view('bottom'))
-    plotter.add_key_event('i', lambda: _view('iso'))
+    _setup_scene(plotter, combined_bounds or (0.0, 1.0, 0.0, 1.0, 0.0, 1.0))
 
     # In vertex mode, build a pickable point cloud per part (faces become
     # context only) BEFORE the checkboxes, so each checkbox can toggle the
@@ -662,57 +679,7 @@ def show_pyvista(mesh, title="CAD Viewer", volumetric=False):
             specular_power=30,
         )
 
-    # Mesh geometry for camera / grid positioning
-    bounds = mesh.bounds
-    center = np.array([
-        (bounds[0] + bounds[1]) / 2,
-        (bounds[2] + bounds[3]) / 2,
-        (bounds[4] + bounds[5]) / 2,
-    ])
-    size = max(
-        bounds[1] - bounds[0],
-        bounds[3] - bounds[2],
-        bounds[5] - bounds[4],
-    )
-    distance = size * 2.5
-
-    # Grid floor
-    grid_size = max(200, size * 4)
-    grid = pv.Plane(
-        center=(center[0], center[1], bounds[4] - size * 0.1),
-        direction=(0, 0, 1),
-        i_size=grid_size,
-        j_size=grid_size,
-        i_resolution=20,
-        j_resolution=20,
-    )
-    plotter.add_mesh(grid, color='#333333', style='wireframe',
-                     line_width=1, opacity=0.5)
-
-    # Lighting, axes, camera
-    plotter.enable_3_lights()
-    plotter.show_axes()
-    plotter.camera_position = [
-        (center[0] + distance, center[1] + distance, center[2] + distance),
-        tuple(center),
-        (0, 0, 1),
-    ]
-
-    # Key bindings
-    def _view(direction):
-        positions = {
-            'front':  ((center[0], center[1] - distance, center[2]), (0, 0, 1)),
-            'back':   ((center[0], center[1] + distance, center[2]), (0, 0, 1)),
-            'left':   ((center[0] - distance, center[1], center[2]), (0, 0, 1)),
-            'right':  ((center[0] + distance, center[1], center[2]), (0, 0, 1)),
-            'top':    ((center[0], center[1], center[2] + distance), (0, 1, 0)),
-            'bottom': ((center[0], center[1], center[2] - distance), (0, 1, 0)),
-            'iso':    ((center[0] + distance, center[1] + distance,
-                        center[2] + distance), (0, 0, 1)),
-        }
-        pos, up = positions[direction]
-        plotter.camera_position = [pos, tuple(center), up]
-        plotter.render()
+    _setup_scene(plotter, mesh.bounds)
 
     wireframe_state = [False]
 
@@ -724,18 +691,79 @@ def show_pyvista(mesh, title="CAD Viewer", volumetric=False):
             actor.GetProperty().SetRepresentationToSurface()
         plotter.render()
 
-    plotter.add_key_event('f', lambda: _view('front'))
-    plotter.add_key_event('b', lambda: _view('back'))
-    plotter.add_key_event('l', lambda: _view('left'))
-    plotter.add_key_event('g', lambda: _view('right'))
-    plotter.add_key_event('t', lambda: _view('top'))
-    plotter.add_key_event('u', lambda: _view('bottom'))
-    plotter.add_key_event('i', lambda: _view('iso'))
     plotter.add_key_event('z', _toggle_wireframe)
 
     plotter.add_text(
         "Views: F=Front  B=Back  L=Left  G=Right  T=Top  U=Bottom  I=Iso\n"
         "R=Reset  Z=Wireframe  Q=Close",
+        position='lower_left',
+        font_size=8,
+        color='white',
+        shadow=True,
+    )
+
+    plotter.show()
+
+
+def show_volumetric_viewer(ugrid, title="Volumetric Mesh Viewer"):
+    """Display a volumetric mesh, with per-part hide/show for assemblies.
+
+    Splits the grid by its part tagging (:func:`split_grid_by_part`). A
+    single-part mesh (a Part) renders as one actor with no controls — the same
+    look as ``show_pyvista(volumetric=True)``. A multi-part mesh (an Assembly)
+    renders one actor per part plus a visibility-checkbox column (reusing
+    :func:`_add_visibility_checkboxes`), so each part can be hidden/shown
+    independently. ``Z`` toggles wireframe across all parts.
+
+    The Part-vs-Assembly decision is data-driven (the part count carried on the
+    grid), so it holds identically for the live and the loaded mesh paths.
+
+    This is a blocking call — it returns when the viewer window is closed.
+    """
+    parts = split_grid_by_part(ugrid)
+    multi = len(parts) > 1
+
+    plotter = pv.Plotter(title=title)
+    plotter.set_background(BACKGROUND_COLOR)
+
+    part_entries: List[tuple] = []
+    for label, subgrid in parts:
+        actor = plotter.add_mesh(
+            subgrid,
+            color=VOLUMETRIC_COLOR,
+            show_edges=True,
+            edge_color='#333333',
+            opacity=1.0,
+            smooth_shading=False,
+            lighting=True,
+        )
+        part_entries.append((label, actor, subgrid))
+
+    _setup_scene(plotter, ugrid.bounds)
+
+    # Per-part visibility checkboxes only for an assembly (>1 part); a single
+    # part shows no control (Feature R1).
+    if multi:
+        _add_visibility_checkboxes(plotter, part_entries)
+
+    wireframe_state = [False]
+
+    def _toggle_wireframe():
+        wireframe_state[0] = not wireframe_state[0]
+        for _label, actor, _subgrid in part_entries:
+            prop = actor.GetProperty()
+            if wireframe_state[0]:
+                prop.SetRepresentationToWireframe()
+            else:
+                prop.SetRepresentationToSurface()
+        plotter.render()
+
+    plotter.add_key_event('z', _toggle_wireframe)
+
+    parts_help = "  Checkboxes=Hide/show parts" if multi else ""
+    plotter.add_text(
+        "Views: F=Front  B=Back  L=Left  G=Right  T=Top  U=Bottom  I=Iso\n"
+        f"R=Reset  Z=Wireframe{parts_help}  Q=Close",
         position='lower_left',
         font_size=8,
         color='white',
@@ -898,6 +926,8 @@ class ModelViewer(GObject.Object):
                     self._parts, title=title, pick_state=pick_state,
                     pick_mode=pick_mode, single=single,
                 )
+            elif self._is_volumetric:
+                show_volumetric_viewer(self._mesh, title=title)
             else:
                 show_pyvista(
                     self._mesh, title=title, volumetric=self._is_volumetric,

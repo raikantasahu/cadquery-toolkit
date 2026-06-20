@@ -623,7 +623,8 @@ class CadQueryApp(Gtk.Window):
         if not self._core.has_mesh():
             return
 
-        ugrid = self._core.mesh_object.get_pyvista_mesh()
+        ugrid = self._core.mesh_object.get_pyvista_mesh(
+            part_labels=self._core.part_labels())
 
         self.parts_builder.set_sensitive_controls(False)
         self.assemblies_builder.set_sensitive_controls(False)
