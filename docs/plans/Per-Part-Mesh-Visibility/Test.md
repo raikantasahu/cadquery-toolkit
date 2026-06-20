@@ -104,6 +104,14 @@ assembly mesh is unchanged by this feature.
   `test_p3_part_labels.py`, `test_p3_sources.py` — and the manual GUI checks
   pass (per-part hide/show with real names; pick-viewer refactor regression-free).
 
+## Surface model viewer (P4 extension)
+The same per-part hide/show was extended to the plain **CAD model** geometry
+view. Headless gate (`test_model_viewer_parts.py`): `create_polydatas_per_part`
+yields >1 named part for an assembly (`bottom-plate`/`top-plate`/`bolt-1`) and
+exactly one for a single part — the data `show_viewer` gates on. The
+rendering/checkbox interaction is a manual GUI check (below), the same R2/R6/R8/R9
+behaviours as the mesh viewer applied to the geometry view.
+
 ## Manual (GUI) checks
 Not headless-automatable; verify by hand on F-assembly and F-part:
 - **R1:** assembly mesh shows one toggle per part; single-part mesh shows none.

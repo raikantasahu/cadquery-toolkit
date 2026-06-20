@@ -2,6 +2,10 @@
 
 Status: **shipped** (2026-06-20) — delivered in `Implementation.md` phases
 P1–P3; all requirements below met (see `Test.md` T0–T5 + manual GUI checks).
+**Extended (2026-06-20):** the same per-part hide/show now also covers the
+**surface CAD model viewer** (the plain geometry view of an assembly), sharing
+the mesh viewer's body via `_run_parts_viewer` — see `Implementation.md` P4.
+Requirements R1–R9 read the same with "mesh" → "model" for that view.
 
 ## Summary
 When the volumetric mesh on display is the mesh of an **assembly** (more than
@@ -94,7 +98,9 @@ the feature is deliberately **absent** for a part.
 - **Per-part mesh controls** (element size/type per part) — that is the
   `Part-Specific-Mesh-Controls.md` track; this feature only governs display.
 - Re-meshing or per-part re-meshing.
-- Changing the surface CAD viewer (it already has per-part hide/show).
+- (Was out of scope; now **included** — see Status.) The surface CAD model
+  viewer shares the same per-part hide/show: its face/vertex **picker** always
+  had it, and the **plain geometry view** now does too (Implementation P4).
 
 ## Decisions
 - **A "part" = one solid body in the mesh** (one gmsh volume / one fragment

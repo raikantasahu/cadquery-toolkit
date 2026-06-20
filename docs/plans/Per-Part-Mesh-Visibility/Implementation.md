@@ -127,6 +127,10 @@ tags directly.)
 - `viewer/model_viewer.py` — `_setup_scene` shared scaffold (factored out of
   `show_pyvista`/`show_pick_viewer`); new `show_volumetric_viewer` consuming the
   `mesh_parts` helpers; `show_viewer` routes its volumetric branch through it.
+  **P4:** `_combined_bounds` + `_run_parts_viewer` (shared mesh/model body),
+  `show_model_viewer`; `set_mesh_from_dict` builds `self._parts` for every
+  surface model; `show_viewer` routes the plain assembly view to
+  `show_model_viewer`.
 - `app_core.py` — `part_labels()` accessor (ordered assembly child names /
   single-part name; `None` when unavailable).
 - `app_gtk.py` — `_on_menu_view_mesh` passes `core.part_labels()` straight to
@@ -153,9 +157,22 @@ tags directly.)
   `test_p3_part_labels.py`), **T4** (live vs loaded agree) + **T5**
   (non-destructive) — `test_p3_sources.py`. GUI confirmed real names
   (`bottom-plate` / `top-plate` / `bolt-1`).
+- **P4 — Same control in the surface CAD model viewer (extension).** Factor the
+  per-part viewer body shared by mesh + model views into `_run_parts_viewer`
+  (`volumetric` flag only selects actor styling); `show_volumetric_viewer`
+  delegates to it, and a new `show_model_viewer(parts)` is its geometry-view
+  twin. Extract `_combined_bounds` (also adopted by `show_pick_viewer`).
+  `set_mesh_from_dict` now builds `self._parts` for **every** surface model (not
+  just pick mode); `show_viewer` routes the plain assembly view
+  (`_parts` and `len > 1`) to `show_model_viewer`, single part → `show_pyvista`
+  unchanged. Headless data gate pinned by `test_model_viewer_parts.py`
+  (assembly → named parts; single → one part); the rendering/checkbox
+  interaction is a manual GUI check. The picker already had per-part hide/show;
+  this brings the plain geometry view to parity.
 
 Acceptance (per `Test.md`): **MET** — T0–T5 green headlessly in the `cadquery`
-env + the manual GUI checks pass. Feature complete.
+env + the manual GUI checks pass. P4 (model-viewer parity) headless gate green;
+pending its manual GUI check.
 
 ## Risks / decisions to settle while building
 - **Label availability for imported STEP.** Until `Component.Name` flows through
