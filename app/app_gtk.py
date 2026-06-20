@@ -217,15 +217,6 @@ class CadQueryApp(Gtk.Window):
         self.status_label.set_attributes(attr_list)
         vbox.pack_start(self.status_label, False, False, 0)
 
-        # Keyboard shortcuts info
-        shortcuts_label = Gtk.Label()
-        shortcuts_label.set_markup(
-            '<small><b>Viewer shortcuts:</b> 1-6: Views | R: Reset | W: Wireframe | Q: Close</small>'
-        )
-        shortcuts_label.set_halign(Gtk.Align.START)
-        shortcuts_label.set_margin_top(5)
-        vbox.pack_start(shortcuts_label, False, False, 0)
-
         # Connect the tab-switch handler only AFTER the pages and status_label
         # exist. append_page() emits 'switch-page' during construction, and the
         # handler restores the new tab's status via self.status_label + re-syncs

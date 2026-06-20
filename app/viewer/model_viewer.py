@@ -564,6 +564,8 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
             'right':  ((center[0] + distance, center[1], center[2]), (0, 0, 1)),
             'top':    ((center[0], center[1], center[2] + distance), (0, 1, 0)),
             'bottom': ((center[0], center[1], center[2] - distance), (0, 1, 0)),
+            'iso':    ((center[0] + distance, center[1] + distance,
+                        center[2] + distance), (0, 0, 1)),
         }
         pos, up = positions[direction]
         plotter.camera_position = [pos, tuple(center), up]
@@ -575,6 +577,7 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
     plotter.add_key_event('g', lambda: _view('right'))
     plotter.add_key_event('t', lambda: _view('top'))
     plotter.add_key_event('u', lambda: _view('bottom'))
+    plotter.add_key_event('i', lambda: _view('iso'))
 
     # In vertex mode, build a pickable point cloud per part (faces become
     # context only) BEFORE the checkboxes, so each checkbox can toggle the
@@ -609,9 +612,11 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
         _setup_multi_face_picking(plotter, part_entries, pick_state,
                                   single=single)
 
-    pick_help = "P=Pick vertex" if pick_mode == "vertices" else "P=Pick face"
+    pick_help = ("Left-click=Pick vertex" if pick_mode == "vertices"
+                 else "Left-click=Pick face")
     plotter.add_text(
-        f"Views: F/B/L/G/T/U  R=Reset  {pick_help}  Q=Quit",
+        "Views: F=Front  B=Back  L=Left  G=Right  T=Top  U=Bottom  I=Iso\n"
+        f"R=Reset  {pick_help}  Q=Close",
         position='lower_left',
         font_size=8,
         color='white',
@@ -702,6 +707,8 @@ def show_pyvista(mesh, title="CAD Viewer", volumetric=False):
             'right':  ((center[0] + distance, center[1], center[2]), (0, 0, 1)),
             'top':    ((center[0], center[1], center[2] + distance), (0, 1, 0)),
             'bottom': ((center[0], center[1], center[2] - distance), (0, 1, 0)),
+            'iso':    ((center[0] + distance, center[1] + distance,
+                        center[2] + distance), (0, 0, 1)),
         }
         pos, up = positions[direction]
         plotter.camera_position = [pos, tuple(center), up]
@@ -723,11 +730,12 @@ def show_pyvista(mesh, title="CAD Viewer", volumetric=False):
     plotter.add_key_event('g', lambda: _view('right'))
     plotter.add_key_event('t', lambda: _view('top'))
     plotter.add_key_event('u', lambda: _view('bottom'))
+    plotter.add_key_event('i', lambda: _view('iso'))
     plotter.add_key_event('z', _toggle_wireframe)
 
     plotter.add_text(
-        "Views: F=Front  B=Back  L=Left  G=Right  T=Top  U=Bottom\n"
-        "R=Reset  Z=Wireframe  Q=Quit",
+        "Views: F=Front  B=Back  L=Left  G=Right  T=Top  U=Bottom  I=Iso\n"
+        "R=Reset  Z=Wireframe  Q=Close",
         position='lower_left',
         font_size=8,
         color='white',
