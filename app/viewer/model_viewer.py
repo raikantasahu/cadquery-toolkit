@@ -474,6 +474,24 @@ def _add_visibility_checkboxes(plotter, part_entries,
         y += button_size + pad
 
 
+def _combined_bounds(meshes):
+    """Union of the bounds of ``meshes`` as ``(xmin, xmax, ymin, ymax, zmin,
+    zmax)``; a safe unit cube when there are none."""
+    combined = None
+    for mesh in meshes:
+        b = mesh.bounds
+        if combined is None:
+            combined = list(b)
+        else:
+            combined[0] = min(combined[0], b[0])
+            combined[1] = max(combined[1], b[1])
+            combined[2] = min(combined[2], b[2])
+            combined[3] = max(combined[3], b[3])
+            combined[4] = min(combined[4], b[4])
+            combined[5] = max(combined[5], b[5])
+    return tuple(combined) if combined else (0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+
+
 def _setup_scene(plotter, bounds):
     """Shared viewer scaffold: grid floor, 3-light setup, axes, iso camera, and
     the view-preset key bindings (f/b/l/g/t/u/i). Used by all three viewers
@@ -571,7 +589,6 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
 
     # One actor per part so visibility can be toggled independently.
     part_entries: List[tuple] = []
-    combined_bounds = None
     for label, mesh in parts:
         actor = plotter.add_mesh(
             mesh,
@@ -583,18 +600,8 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
             specular_power=30,
         )
         part_entries.append((label, actor, mesh))
-        b = mesh.bounds
-        if combined_bounds is None:
-            combined_bounds = list(b)
-        else:
-            combined_bounds[0] = min(combined_bounds[0], b[0])
-            combined_bounds[1] = max(combined_bounds[1], b[1])
-            combined_bounds[2] = min(combined_bounds[2], b[2])
-            combined_bounds[3] = max(combined_bounds[3], b[3])
-            combined_bounds[4] = min(combined_bounds[4], b[4])
-            combined_bounds[5] = max(combined_bounds[5], b[5])
 
-    _setup_scene(plotter, combined_bounds or (0.0, 1.0, 0.0, 1.0, 0.0, 1.0))
+    _setup_scene(plotter, _combined_bounds(m for _label, m in parts))
 
     # In vertex mode, build a pickable point cloud per part (faces become
     # context only) BEFORE the checkboxes, so each checkbox can toggle the
@@ -705,44 +712,40 @@ def show_pyvista(mesh, title="CAD Viewer", volumetric=False):
     plotter.show()
 
 
-def show_volumetric_viewer(ugrid, title="Volumetric Mesh Viewer"):
-    """Display a volumetric mesh, with per-part hide/show for assemblies.
+def _run_parts_viewer(parts, title, volumetric):
+    """Render a per-part viewer: one actor per ``(label, mesh)``, the shared
+    scene scaffold, a per-part visibility-checkbox column for an assembly
+    (>1 part), and a ``Z`` wireframe toggle across all parts. Shared by the
+    volumetric mesh viewer and the surface CAD model viewer; ``volumetric`` only
+    selects actor styling (edged volumetric vs smooth surface).
 
-    Splits the grid by its part tagging (:func:`split_grid_by_part`). A
-    single-part mesh (a Part) renders as one actor with no controls — the same
-    look as ``show_pyvista(volumetric=True)``. A multi-part mesh (an Assembly)
-    renders one actor per part plus a visibility-checkbox column (reusing
-    :func:`_add_visibility_checkboxes`), so each part can be hidden/shown
-    independently. ``Z`` toggles wireframe across all parts.
-
-    The Part-vs-Assembly decision is data-driven (the part count carried on the
-    grid), so it holds identically for the live and the loaded mesh paths.
+    The Part-vs-Assembly decision is data-driven (the part count), so a single
+    part shows no control and an assembly gets one checkbox per part.
 
     This is a blocking call — it returns when the viewer window is closed.
     """
-    parts = split_grid_by_part(ugrid)
     multi = len(parts) > 1
 
     plotter = pv.Plotter(title=title)
     plotter.set_background(BACKGROUND_COLOR)
 
     part_entries: List[tuple] = []
-    for label, subgrid in parts:
-        actor = plotter.add_mesh(
-            subgrid,
-            color=VOLUMETRIC_COLOR,
-            show_edges=True,
-            edge_color='#333333',
-            opacity=1.0,
-            smooth_shading=False,
-            lighting=True,
-        )
-        part_entries.append((label, actor, subgrid))
+    for label, mesh in parts:
+        if volumetric:
+            actor = plotter.add_mesh(
+                mesh, color=VOLUMETRIC_COLOR, show_edges=True,
+                edge_color='#333333', opacity=1.0, smooth_shading=False,
+                lighting=True,
+            )
+        else:
+            actor = plotter.add_mesh(
+                mesh, color=DEFAULT_COLOR, show_edges=False, lighting=True,
+                smooth_shading=True, specular=0.5, specular_power=30,
+            )
+        part_entries.append((label, actor, mesh))
 
-    _setup_scene(plotter, ugrid.bounds)
+    _setup_scene(plotter, _combined_bounds(m for _label, m in parts))
 
-    # Per-part visibility checkboxes only for an assembly (>1 part); a single
-    # part shows no control (Feature R1).
     if multi:
         _add_visibility_checkboxes(plotter, part_entries)
 
@@ -750,7 +753,7 @@ def show_volumetric_viewer(ugrid, title="Volumetric Mesh Viewer"):
 
     def _toggle_wireframe():
         wireframe_state[0] = not wireframe_state[0]
-        for _label, actor, _subgrid in part_entries:
+        for _label, actor, _mesh in part_entries:
             prop = actor.GetProperty()
             if wireframe_state[0]:
                 prop.SetRepresentationToWireframe()
@@ -771,6 +774,31 @@ def show_volumetric_viewer(ugrid, title="Volumetric Mesh Viewer"):
     )
 
     plotter.show()
+
+
+def show_volumetric_viewer(ugrid, title="Volumetric Mesh Viewer"):
+    """Display a volumetric mesh, with per-part hide/show for assemblies.
+
+    Splits the grid by its part tagging (:func:`split_grid_by_part`); a
+    single-part mesh renders as one actor with no controls, a multi-part mesh as
+    one actor per part plus a visibility-checkbox column. Data-driven, so the
+    same rule holds for the live and the loaded mesh paths.
+
+    This is a blocking call — it returns when the viewer window is closed.
+    """
+    _run_parts_viewer(split_grid_by_part(ugrid), title, volumetric=True)
+
+
+def show_model_viewer(parts, title="CAD Model Viewer"):
+    """Display a surface CAD model split per part, with per-part hide/show for
+    assemblies (>1 part). ``parts`` is ``[(label, pv.PolyData)]`` from
+    :func:`model.tessellation.create_polydatas_per_part`. The geometry-view
+    counterpart of :func:`show_volumetric_viewer`; a single part renders like
+    ``show_pyvista`` with no control.
+
+    This is a blocking call — it returns when the viewer window is closed.
+    """
+    _run_parts_viewer(parts, title, volumetric=False)
 
 
 class ModelViewer(GObject.Object):
@@ -848,13 +876,12 @@ class ModelViewer(GObject.Object):
                 self._mesh = create_polydata_from_model_data(
                     data, with_face_index=with_face_index,
                 )
-                # Build the per-part split too when picking is in play, so
-                # show_viewer can route to show_pick_viewer with one actor
-                # per part for independent hide/show.
-                self._parts = (
-                    create_polydatas_per_part(data, with_face_index=True)
-                    if with_face_index else None
-                )
+                # Always build the per-part split so the plain view can offer
+                # per-part hide/show on assemblies (show_model_viewer) and the
+                # pick view can route to show_pick_viewer. face_index is only
+                # needed for picking, so it tracks with_face_index.
+                self._parts = create_polydatas_per_part(
+                    data, with_face_index=with_face_index)
                 self._is_volumetric = False
             info = self.get_mesh_info()
             self.emit('mesh-loaded', info)
@@ -928,6 +955,9 @@ class ModelViewer(GObject.Object):
                 )
             elif self._is_volumetric:
                 show_volumetric_viewer(self._mesh, title=title)
+            elif self._parts is not None and len(self._parts) > 1:
+                # Assembly geometry view: one actor per part + hide/show column.
+                show_model_viewer(self._parts, title=title)
             else:
                 show_pyvista(
                     self._mesh, title=title, volumetric=self._is_volumetric,
