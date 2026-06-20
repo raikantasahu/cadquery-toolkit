@@ -110,8 +110,9 @@ model_render.png
 test_render.png
 output.png
 
-# Local one-off render script (kept on disk, out of git)
+# Local render scripts — iterated on personally, kept on disk, out of git
 _render_showcase.py
+_render_linkedin.py
 
 # Temporary files
 *.tmp
