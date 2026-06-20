@@ -645,9 +645,13 @@ class GmshMesher:
         if relative_sag_tolerance and relative_sag_tolerance > 0:
             n = sag_tol_to_elements_per_circle(relative_sag_tolerance)
             gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", n)
-            # Relax the minimum-size clamp so tight curves can refine below
-            # element_size * 0.5. Gmsh treats 0 as "no lower bound".
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.0)
+            # Allow curves to refine below element_size, but keep a LOWER BOUND:
+            # a bound of 0 ("no lower bound") lets a tiny-radius feature on a
+            # foreign STEP drive the size toward zero, exploding the mesh density
+            # until gmsh crashes (segfault). Floor at a small fraction of
+            # element_size to bound worst-case density.
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin",
+                                  element_size * 0.05)
         elif refinements:
             # Refinement fields prescribe sizes well below element_size; relax
             # the lower clamp (0 = no bound) so they are not clamped back up.
