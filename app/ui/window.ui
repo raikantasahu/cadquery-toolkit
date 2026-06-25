@@ -41,6 +41,20 @@
               </object>
             </child>
             <child>
+              <object class="GtkMenuItem" id="menu_pick_edges">
+                <property name="label">Pick Edges…</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_pick_edges"/>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuItem" id="menu_edit_edge_selection">
+                <property name="label">Edit Edge Selection…</property>
+                <property name="sensitive">False</property>
+                <signal name="activate" handler="_on_menu_edit_edge_selection"/>
+              </object>
+            </child>
+            <child>
               <object class="GtkMenuItem" id="menu_pick_vertices">
                 <property name="label">Pick Vertices…</property>
                 <property name="sensitive">False</property>

@@ -72,6 +72,9 @@ class CadQueryApp(Gtk.Window):
         # entity type (F* and V* keys never collide in entity_owners).
         self._picked_faces: list = []
         self._picked_vertices: list = []
+        # Edge picks: (E#, label) tuples. Stored here (Edge-Identity-and-Picking
+        # F1); wiring them into entity_owners is the edge-container feature (F2).
+        self._picked_edges: list = []
         # Single cap face (persistent_id, label) for extruded hex, or None.
         self._cap_face: tuple = None
         # Refinement regions: list of dicts
@@ -144,6 +147,10 @@ class CadQueryApp(Gtk.Window):
         self.menu_pick_vertices = builder.get_object("menu_pick_vertices")
         self.menu_edit_vertex_selection = builder.get_object(
             "menu_edit_vertex_selection"
+        )
+        self.menu_pick_edges = builder.get_object("menu_pick_edges")
+        self.menu_edit_edge_selection = builder.get_object(
+            "menu_edit_edge_selection"
         )
         self.menu_create_mesh = builder.get_object("menu_create_mesh")
         self.menu_view_mesh = builder.get_object("menu_view_mesh")
@@ -362,6 +369,19 @@ class CadQueryApp(Gtk.Window):
             on_closed=self._on_pick_vertices_viewer_closed,
         )
 
+    def _on_menu_pick_edges(self, menuitem) -> None:
+        """Handle Model > Pick Edges menu activation."""
+        self._open_pick_viewer(
+            pick_mode="edges",
+            title="Pick Edges",
+            status_text=(
+                "Edge picker open — left-click an edge to pick/unpick. "
+                "Close window when done."
+            ),
+            initial_picks=self._picked_edges,
+            on_closed=self._on_pick_edges_viewer_closed,
+        )
+
     def _open_pick_viewer(self, pick_mode, title, status_text,
                           initial_picks, on_closed) -> None:
         """Build the current model and open the viewer in a pick mode.
@@ -406,6 +426,11 @@ class CadQueryApp(Gtk.Window):
         self._finish_pick_viewer(
             "vertex", "vertices", len(self._picked_vertices),
         )
+
+    def _on_pick_edges_viewer_closed(self, viewer) -> None:
+        """Commit edge picks when the edge picker closes."""
+        self._picked_edges = list(viewer.picked_edges)
+        self._finish_pick_viewer("edge", "edges", len(self._picked_edges))
 
     def _finish_pick_viewer(self, singular: str, plural: str, n: int) -> None:
         """Restore UI sensitivity and report the count after a picker closes."""
@@ -453,6 +478,22 @@ class CadQueryApp(Gtk.Window):
         self.status_label.set_text(
             f"Vertex selection updated. {n} "
             f"{'vertex' if n == 1 else 'vertices'}."
+        )
+
+    def _on_menu_edit_edge_selection(self, menuitem) -> None:
+        """Handle Model > Edit Edge Selection menu activation."""
+        if not self._picked_edges:
+            return
+        edited = edit_face_selection(
+            self, self._picked_edges, title="Edit Edge Selection",
+        )
+        if edited is None:
+            return
+        self._picked_edges = edited
+        self._sync_menu_sensitivity()
+        n = len(self._picked_edges)
+        self.status_label.set_text(
+            f"Edge selection updated. {n} edge{'s' if n != 1 else ''}."
         )
 
     def _sync_core_model(self) -> bool:
@@ -752,6 +793,7 @@ class CadQueryApp(Gtk.Window):
         has_mesh = self._core.has_mesh()
         has_picks = bool(self._picked_faces)
         has_vertex_picks = bool(self._picked_vertices)
+        has_edge_picks = bool(self._picked_edges)
         self.menu_view.set_sensitive(enabled and has_model)
         self.menu_export.set_sensitive(enabled and has_model)
         self.menu_pick_faces.set_sensitive(enabled and has_model)
@@ -759,6 +801,10 @@ class CadQueryApp(Gtk.Window):
         self.menu_pick_vertices.set_sensitive(enabled and has_model)
         self.menu_edit_vertex_selection.set_sensitive(
             enabled and has_vertex_picks
+        )
+        self.menu_pick_edges.set_sensitive(enabled and has_model)
+        self.menu_edit_edge_selection.set_sensitive(
+            enabled and has_edge_picks
         )
         self.menu_create_mesh.set_sensitive(enabled and has_model)
         self.menu_view_mesh.set_sensitive(enabled and has_mesh)
@@ -779,6 +825,7 @@ class CadQueryApp(Gtk.Window):
         self._finalize_current_mesh()
         self._picked_faces = []
         self._picked_vertices = []
+        self._picked_edges = []
         self._cap_face = None
         self._refinements = []
         self._mesh_settings = None
