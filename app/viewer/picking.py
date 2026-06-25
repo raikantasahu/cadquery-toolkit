@@ -1,10 +1,13 @@
 """Interactive entity picking for the CAD viewers (face / vertex / edge).
 
 Wires left-click picking onto a pyvista Plotter: a left click toggles the
-entity under the cursor; a left drag still rotates the camera. One
-``_setup_multi_*_picking`` per entity kind, plus the low-level click/interactor
-helpers they share. GTK-free (pyvista + vtk + numpy); the window-composition
-layer (``viewer.viewers``) calls these.
+entity under the cursor; a left drag still rotates the camera. A single
+``_setup_picking`` core holds the shared machinery (overlay, toggle, remove,
+re-highlight, click wiring); one thin ``_setup_multi_*_picking`` wrapper per
+entity kind supplies the three things that genuinely differ — how a click
+resolves to an entity index, how the pick is highlighted, and the label wording.
+GTK-free (pyvista + vtk + numpy); the window-composition layer
+(``viewer.viewers``) calls the wrappers.
 """
 from typing import Any, Dict, List
 
@@ -78,116 +81,84 @@ def _on_left_click(plotter, callback, drag_tol=5):
     iren.add_observer('LeftButtonReleaseEvent', _release)
 
 
-def _setup_multi_face_picking(plotter, part_entries, pick_state, single=False):
-    """Wire up face picking across multiple part actors.
+def _add_pick_label(plotter, location, pid: str, label: str) -> str:
+    """Float a billboarded ``label`` at world ``location``; return its actor name
+    (named so it can be removed reliably — ``add_point_labels`` return types vary
+    across PyVista versions). ``pid`` is globally unique (F#/V#/E#), so the name
+    is unique within a pick session."""
+    label_name = f"pick_label_{pid}"
+    plotter.add_point_labels(
+        [list(location)],
+        [label],
+        font_size=14,
+        text_color='black',
+        shape='rect',
+        shape_color=PICK_HIGHLIGHT_COLOR,
+        shape_opacity=0.85,
+        show_points=False,
+        always_visible=True,
+        reset_camera=False,
+        name=label_name,
+    )
+    return label_name
+
+
+def _setup_picking(plotter, pick_state, single, *, prefix, singular, plural,
+                   pids_by_actor, resolve_pick, add_highlight):
+    """Shared pick machinery for every entity kind.
+
+    The three pickers differ only in three injected pieces; this core owns the
+    rest (overlay text + refresh, the monotonic ``{prefix} N`` counter, toggle /
+    deselect / single-replace, removal, re-highlight of caller-supplied picks,
+    and the left-click wiring).
 
     Args:
-        plotter: The active pv.Plotter.
-        part_entries: List of ``(label, actor, mesh)`` for each part
-            currently shown. Each ``mesh`` must carry ``face_index``
-            cell_data and ``face_pids`` field_data.
-        pick_state: Dict with ``picks`` list of ``(pid, label)``.
-        single: When True, only one face may be selected at a time — picking a
-            different face replaces the previous selection (for the cap face).
-            When False (default), picks accumulate and each toggles.
-
-    User left-clicks a face to toggle the face under the cursor (a left drag
-    rotates the camera instead). Only cells of visible actors are picked (VTK's
-    vtkCellPicker honors actor visibility), so hiding a part via its
-    checkbox effectively excludes it from the pick.
+        pick_state: Dict with a ``picks`` list of ``(pid, label)`` — read/written
+            in place; the caller reads it after the window closes.
+        single: One entity at a time (a new pick replaces the previous) vs accumulate.
+        prefix / singular / plural: label + overlay wording, e.g.
+            ``("Face", "face", "faces")`` or ``("Vertex", "vertex", "vertices")``.
+        pids_by_actor: ``{actor: [pid, ...]}`` — index -> pid, and the source for
+            re-highlighting existing picks.
+        resolve_pick: ``(x, y) -> (actor, index)`` for the entity under the
+            cursor, or ``(None, None)`` if nothing was hit.
+        add_highlight: ``(actor, index, pid, label) -> (highlight_actor,
+            label_name)`` that draws the selection, or ``None`` if it can't.
     """
-    import vtk
-
-    picker = vtk.vtkCellPicker()
-    picker.SetTolerance(0.0005)
-
-    # vtkActor → (cell_face_index ndarray, face_pids list, owning mesh)
-    actor_lookup: Dict[Any, tuple] = {}
-    for _label, actor, mesh in part_entries:
-        cell_face_index = mesh.cell_data.get("face_index")
-        face_pids_arr = mesh.field_data.get("face_pids")
-        if cell_face_index is None or face_pids_arr is None:
-            continue
-        actor_lookup[actor] = (
-            np.asarray(cell_face_index, dtype=np.int32),
-            [str(p) for p in face_pids_arr],
-            mesh,
-        )
-
-    # Per-pid state: highlight actor + label actor, so toggling off can
-    # remove both. Labels are floated at each face's centroid so the user
-    # can map "Face 1/2/3" in the overlay back to a spot on the model.
     pid_to_actors: Dict[str, tuple] = {}
-
-    # Monotonic counter for auto-generated "Face N" labels — never reused,
-    # so unpicking + re-picking does not produce duplicate labels.
-    next_pick_n = [_next_auto_pick_number(pick_state['picks'])]
+    next_pick_n = [_next_auto_pick_number(pick_state['picks'], prefix=prefix)]
+    overlay_name = f"{singular}_pick_overlay"
 
     def _overlay_text() -> str:
         if not pick_state['picks']:
             if single:
-                return ("Face picker: left-click a face to select.\n"
-                        "Picking another face replaces the selection.\n"
-                        "No face selected yet.")
-            return ("Face picker: left-click a face to pick/unpick.\n"
+                return (f"{prefix} picker: left-click a {singular} to select.\n"
+                        f"Picking another {singular} replaces the selection.\n"
+                        f"No {singular} selected yet.")
+            return (f"{prefix} picker: left-click a {singular} to pick/unpick.\n"
                     "Use the checkboxes on the left to hide/show parts.\n"
-                    "No faces picked yet.")
-        header = ("Selected face (left-click another to replace):" if single
-                  else "Picked faces (left-click to toggle):")
+                    f"No {plural} picked yet.")
+        header = (f"Selected {singular} (left-click another to replace):"
+                  if single else f"Picked {plural} (left-click to toggle):")
         lines = [header]
         for pid, label in pick_state['picks']:
             lines.append(f"  {label}  [{pid}]")
         return "\n".join(lines)
 
-    _OVERLAY_NAME = 'face_pick_overlay'
-    plotter.add_text(
-        _overlay_text(), position='upper_right', font_size=10,
-        color='yellow', shadow=True, name=_OVERLAY_NAME,
-    )
-
-    def _refresh_overlay():
-        # Update by re-adding under the same name. add_text(position=<corner>)
-        # returns a vtkCornerAnnotation, whose text is set via SetText(corner,
-        # ...) — NOT SetInput(...), which only exists on vtkTextActor. Re-adding
-        # by name replaces the actor without depending on the corner index or
-        # the actor's VTK type across pyvista/VTK versions.
+    def _draw_overlay():
+        # Re-add under the same name to update: add_text(position=<corner>)
+        # returns a vtkCornerAnnotation (text set via SetText(corner, ...), not
+        # SetInput), so replacing by name is the version-robust refresh.
         plotter.add_text(
             _overlay_text(), position='upper_right', font_size=10,
-            color='yellow', shadow=True, name=_OVERLAY_NAME,
+            color='yellow', shadow=True, name=overlay_name,
         )
-        plotter.render()
 
-    def _add_highlight(actor, face_idx: int, pid: str, label: str) -> bool:
-        cell_face_index, _pids, mesh = actor_lookup[actor]
-        cell_ids = np.where(cell_face_index == face_idx)[0]
-        if len(cell_ids) == 0:
-            return False
-        sub = mesh.extract_cells(cell_ids)
-        sub_actor = plotter.add_mesh(
-            sub, color=PICK_HIGHLIGHT_COLOR, show_edges=False,
-            lighting=True, smooth_shading=False, pickable=False,
-        )
-        # Billboarded label at the face centroid (mean of its vertices)
-        # so the overlay's "Face N" can be located on the model itself.
-        # Use a name for the label so it can be removed reliably across
-        # PyVista versions (add_point_labels return type varies).
-        centroid = np.asarray(sub.points, dtype=np.float64).mean(axis=0)
-        label_name = f"pick_label_{pid}"
-        plotter.add_point_labels(
-            [centroid.tolist()],
-            [label],
-            font_size=14,
-            text_color='black',
-            shape='rect',
-            shape_color=PICK_HIGHLIGHT_COLOR,
-            shape_opacity=0.85,
-            show_points=False,
-            always_visible=True,
-            reset_camera=False,
-            name=label_name,
-        )
-        pid_to_actors[pid] = (sub_actor, label_name)
-        return True
+    _draw_overlay()
+
+    def _refresh_overlay():
+        _draw_overlay()
+        plotter.render()
 
     def _remove_pick(pid: str) -> None:
         sub_actor, label_name = pid_to_actors.pop(pid)
@@ -197,65 +168,115 @@ def _setup_multi_face_picking(plotter, part_entries, pick_state, single=False):
             (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
         ]
 
-    def _toggle(actor, face_idx: int) -> None:
-        info = actor_lookup.get(actor)
-        if info is None:
+    def _toggle(actor, idx: int) -> None:
+        pids = pids_by_actor.get(actor)
+        if pids is None or idx < 0 or idx >= len(pids):
             return
-        _cell_face_index, face_pids, _mesh = info
-        if face_idx < 0 or face_idx >= len(face_pids):
-            return
-        pid = face_pids[face_idx]
+        pid = pids[idx]
         if pid in pid_to_actors:
             _remove_pick(pid)               # click the current pick -> deselect
-        else:
-            if single:
-                # One face at a time: a new pick replaces the previous one.
-                for prev in list(pid_to_actors):
-                    _remove_pick(prev)
-            label = "Face 1" if single else f"Face {next_pick_n[0]}"
-            if not _add_highlight(actor, face_idx, pid, label):
-                return
-            if not single:
-                next_pick_n[0] += 1
-            pick_state['picks'].append((pid, label))
+            _refresh_overlay()
+            return
+        if single:
+            for prev in list(pid_to_actors):
+                _remove_pick(prev)
+        label = f"{prefix} 1" if single else f"{prefix} {next_pick_n[0]}"
+        created = add_highlight(actor, idx, pid, label)
+        if created is None:
+            return
+        pid_to_actors[pid] = created
+        if not single:
+            next_pick_n[0] += 1
+        pick_state['picks'].append((pid, label))
         _refresh_overlay()
 
     # Re-highlight any picks the caller passed in (so reopening the picker
     # visually shows what was already selected, with the original labels).
-    pid_to_location: Dict[str, tuple] = {}
-    for actor, (_cfi, face_pids, _mesh) in actor_lookup.items():
-        for idx, pid in enumerate(face_pids):
-            pid_to_location[pid] = (actor, idx)
+    pid_to_location = {pid: (actor, idx)
+                       for actor, pids in pids_by_actor.items()
+                       for idx, pid in enumerate(pids)}
     for pid, label in pick_state['picks']:
         loc = pid_to_location.get(pid)
         if loc is not None:
-            actor, idx = loc
-            _add_highlight(actor, idx, pid, label)
+            created = add_highlight(loc[0], loc[1], pid, label)
+            if created is not None:
+                pid_to_actors[pid] = created
 
     def _on_pick_click(x, y):
+        actor, idx = resolve_pick(x, y)
+        if actor is not None:
+            _toggle(actor, idx)
+
+    _on_left_click(plotter, _on_pick_click)
+
+
+def _setup_multi_face_picking(plotter, part_entries, pick_state, single=False):
+    """Wire up face picking across multiple part actors.
+
+    Args:
+        plotter: The active pv.Plotter.
+        part_entries: List of ``(label, actor, mesh)`` for each part currently
+            shown. Each ``mesh`` must carry ``face_index`` cell_data and
+            ``face_pids`` field_data.
+        pick_state: Dict with ``picks`` list of ``(pid, label)``.
+        single: When True, only one face may be selected at a time (e.g. the cap
+            face); when False (default), picks accumulate and each toggles.
+
+    Only cells of visible actors are picked (``vtkCellPicker`` honors actor
+    visibility), so hiding a part via its checkbox excludes it from the pick.
+    """
+    import vtk
+
+    picker = vtk.vtkCellPicker()
+    picker.SetTolerance(0.0005)
+
+    meshes: Dict[Any, tuple] = {}        # actor -> (cell_face_index, mesh)
+    pids_by_actor: Dict[Any, list] = {}
+    for _label, actor, mesh in part_entries:
+        cell_face_index = mesh.cell_data.get("face_index")
+        face_pids = mesh.field_data.get("face_pids")
+        if cell_face_index is None or face_pids is None:
+            continue
+        meshes[actor] = (np.asarray(cell_face_index, dtype=np.int32), mesh)
+        pids_by_actor[actor] = [str(p) for p in face_pids]
+
+    def resolve(x, y):
         picker.Pick(x, y, 0, plotter.renderer)
         cell_id = picker.GetCellId()
         if cell_id < 0:
-            return
-        actor = picker.GetActor()
-        if actor is None or actor not in actor_lookup:
-            return
-        cell_face_index, _pids, _mesh = actor_lookup[actor]
-        _toggle(actor, int(cell_face_index[cell_id]))
+            return None, None
+        info = meshes.get(picker.GetActor())
+        if info is None or cell_id >= len(info[0]):
+            return None, None
+        return picker.GetActor(), int(info[0][cell_id])
 
-    _on_left_click(plotter, _on_pick_click)
+    def add_highlight(actor, idx, pid, label):
+        cell_face_index, mesh = meshes[actor]
+        cell_ids = np.where(cell_face_index == idx)[0]
+        if len(cell_ids) == 0:
+            return None
+        sub = mesh.extract_cells(cell_ids)
+        sub_actor = plotter.add_mesh(
+            sub, color=PICK_HIGHLIGHT_COLOR, show_edges=False,
+            lighting=True, smooth_shading=False, pickable=False,
+        )
+        centroid = np.asarray(sub.points, dtype=np.float64).mean(axis=0)
+        return sub_actor, _add_pick_label(plotter, centroid, pid, label)
+
+    _setup_picking(
+        plotter, pick_state, single, prefix="Face", singular="face",
+        plural="faces", pids_by_actor=pids_by_actor, resolve_pick=resolve,
+        add_highlight=add_highlight,
+    )
 
 
 def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state,
                                 single=False):
     """Wire up vertex picking across multiple part point-cloud actors.
 
-    Mirror of ``_setup_multi_face_picking`` for topological vertices: each
-    part contributes a points actor with one VTK point per CAD vertex. The
-    user left-clicks a vertex to toggle it (a left drag rotates the camera); a
-    vtkPointPicker maps the click to the nearest point id, which indexes the
-    parallel ``vertex_pids`` list. Picks accumulate as ``(pid, label)`` in
-    ``pick_state['picks']`` with auto labels ``Vertex N``.
+    Each part contributes a points actor with one VTK point per CAD vertex; a
+    ``vtkPointPicker`` maps a click to the nearest point id, which indexes the
+    parallel ``vertex_pids`` list.
 
     Args:
         plotter: The active pv.Plotter.
@@ -263,157 +284,57 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state,
             ``points`` is an (N,3) ndarray and ``vertex_pids`` the parallel
             ``V{n}`` id list.
         pick_state: Dict with a ``picks`` list of ``(pid, label)``.
-        single: When True, only one vertex may be selected at a time — picking
-            a different vertex replaces the previous selection (for the
-            refinement anchor). When False (default), picks accumulate.
+        single: When True, only one vertex may be selected at a time (e.g. the
+            refinement anchor); when False (default), picks accumulate.
     """
     import vtk
 
     picker = vtk.vtkPointPicker()
     picker.SetTolerance(0.01)
 
-    # vtkActor → (points ndarray (N,3), vertex_pids list)
-    actor_lookup: Dict[Any, tuple] = {}
+    points_by_actor: Dict[Any, np.ndarray] = {}
+    pids_by_actor: Dict[Any, list] = {}
     for _label, actor, points, vpids in vertex_entries:
-        actor_lookup[actor] = (np.asarray(points, dtype=np.float64), vpids)
+        points_by_actor[actor] = np.asarray(points, dtype=np.float64)
+        pids_by_actor[actor] = vpids
 
-    # Per-pid highlight + label actors, so toggling off can remove both.
-    pid_to_actors: Dict[str, tuple] = {}
-    next_pick_n = [_next_auto_pick_number(pick_state['picks'], prefix="Vertex")]
+    def resolve(x, y):
+        picker.Pick(x, y, 0, plotter.renderer)
+        point_id = picker.GetPointId()
+        if point_id < 0 or picker.GetActor() not in points_by_actor:
+            return None, None
+        return picker.GetActor(), int(point_id)
 
-    def _overlay_text() -> str:
-        if not pick_state['picks']:
-            if single:
-                return ("Vertex picker: left-click a vertex to select.\n"
-                        "Picking another vertex replaces the selection.\n"
-                        "No vertex selected yet.")
-            return ("Vertex picker: left-click a vertex to pick/unpick.\n"
-                    "Use the checkboxes on the left to hide/show parts.\n"
-                    "No vertices picked yet.")
-        header = ("Selected vertex (left-click another to replace):" if single
-                  else "Picked vertices (left-click to toggle):")
-        lines = [header]
-        for pid, label in pick_state['picks']:
-            lines.append(f"  {label}  [{pid}]")
-        return "\n".join(lines)
-
-    _OVERLAY_NAME = 'vertex_pick_overlay'
-    plotter.add_text(
-        _overlay_text(), position='upper_right', font_size=10,
-        color='yellow', shadow=True, name=_OVERLAY_NAME,
-    )
-
-    def _refresh_overlay():
-        # Re-add by name to update — see the note in _setup_multi_face_picking:
-        # add_text returns a vtkCornerAnnotation (no SetInput); replacing by
-        # name is the version-robust way to refresh the overlay text.
-        plotter.add_text(
-            _overlay_text(), position='upper_right', font_size=10,
-            color='yellow', shadow=True, name=_OVERLAY_NAME,
-        )
-        plotter.render()
-
-    def _add_highlight(actor, vidx: int, pid: str, label: str) -> bool:
-        points, _vpids = actor_lookup[actor]
-        if vidx < 0 or vidx >= len(points):
-            return False
-        loc = points[vidx]
-        # A larger highlight sphere sits on the picked vertex; a billboarded
-        # label floats at the same spot so the overlay's "Vertex N" can be
-        # located on the model. Named so it can be removed reliably.
+    def add_highlight(actor, idx, pid, label):
+        points = points_by_actor[actor]
+        if idx < 0 or idx >= len(points):
+            return None
+        loc = points[idx]
         sub_actor = plotter.add_points(
             np.asarray([loc], dtype=np.float64),
             color=PICK_HIGHLIGHT_COLOR, render_points_as_spheres=True,
             point_size=20, pickable=False,
         )
-        label_name = f"vtx_pick_label_{pid}"
-        plotter.add_point_labels(
-            [loc.tolist()],
-            [label],
-            font_size=14,
-            text_color='black',
-            shape='rect',
-            shape_color=PICK_HIGHLIGHT_COLOR,
-            shape_opacity=0.85,
-            show_points=False,
-            always_visible=True,
-            reset_camera=False,
-            name=label_name,
-        )
-        pid_to_actors[pid] = (sub_actor, label_name)
-        return True
+        return sub_actor, _add_pick_label(plotter, loc.tolist(), pid, label)
 
-    def _remove_pick(pid: str) -> None:
-        sub_actor, label_name = pid_to_actors.pop(pid)
-        plotter.remove_actor(sub_actor)
-        plotter.remove_actor(label_name)
-        pick_state['picks'] = [
-            (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
-        ]
-
-    def _toggle(actor, vidx: int) -> None:
-        info = actor_lookup.get(actor)
-        if info is None:
-            return
-        _points, vpids = info
-        if vidx < 0 or vidx >= len(vpids):
-            return
-        pid = vpids[vidx]
-        if pid in pid_to_actors:
-            _remove_pick(pid)               # click the current pick -> deselect
-        else:
-            if single:
-                # One vertex at a time: a new pick replaces the previous one.
-                for prev in list(pid_to_actors):
-                    _remove_pick(prev)
-            label = "Vertex 1" if single else f"Vertex {next_pick_n[0]}"
-            if not _add_highlight(actor, vidx, pid, label):
-                return
-            if not single:
-                next_pick_n[0] += 1
-            pick_state['picks'].append((pid, label))
-        _refresh_overlay()
-
-    # Re-highlight any picks the caller passed in (reopening shows the
-    # existing selection with its original labels).
-    pid_to_location: Dict[str, tuple] = {}
-    for actor, (_points, vpids) in actor_lookup.items():
-        for idx, pid in enumerate(vpids):
-            pid_to_location[pid] = (actor, idx)
-    for pid, label in pick_state['picks']:
-        loc = pid_to_location.get(pid)
-        if loc is not None:
-            actor, idx = loc
-            _add_highlight(actor, idx, pid, label)
-
-    def _on_pick_click(x, y):
-        picker.Pick(x, y, 0, plotter.renderer)
-        point_id = picker.GetPointId()
-        if point_id < 0:
-            return
-        actor = picker.GetActor()
-        if actor is None or actor not in actor_lookup:
-            return
-        _toggle(actor, int(point_id))
-
-    _on_left_click(plotter, _on_pick_click)
+    _setup_picking(
+        plotter, pick_state, single, prefix="Vertex", singular="vertex",
+        plural="vertices", pids_by_actor=pids_by_actor, resolve_pick=resolve,
+        add_highlight=add_highlight,
+    )
 
 
 def _setup_multi_edge_picking(plotter, edge_entries, pick_state, single=False):
     """Wire up edge picking across multiple part line actors.
 
-    Mirror of ``_setup_multi_face_picking`` for CAD edges: each part contributes
-    a line actor (one polyline cell per edge) carrying ``edge_index`` cell_data
-    and ``edge_pids`` field_data. A ``vtkCellPicker`` maps a clicked segment to
-    its cell, whose ``edge_index`` indexes the parallel ``edge_pids``. Picks
-    accumulate as ``(pid, label)`` in ``pick_state['picks']`` with auto labels
-    ``Edge N`` (a left drag rotates the camera instead).
+    Each part contributes a line actor (one polyline cell per edge) carrying
+    ``edge_index`` cell_data and ``edge_pids`` field_data (from
+    ``edge_lines_polydata``). A ``vtkCellPicker`` maps a clicked segment to its
+    cell, whose ``edge_index`` indexes the parallel ``edge_pids``.
 
     Args:
         plotter: The active pv.Plotter.
-        edge_entries: List of ``(label, actor, line_mesh)`` where ``line_mesh``
-            carries ``cell_data["edge_index"]`` + ``field_data["edge_pids"]``
-            (from ``edge_lines_polydata``).
+        edge_entries: List of ``(label, actor, line_mesh)``.
         pick_state: Dict with a ``picks`` list of ``(pid, label)``.
         single: When True, only one edge may be selected at a time.
     """
@@ -422,136 +343,41 @@ def _setup_multi_edge_picking(plotter, edge_entries, pick_state, single=False):
     picker = vtk.vtkCellPicker()
     picker.SetTolerance(0.01)   # looser than faces — edges are thin curves
 
-    # vtkActor → (cell_edge_index ndarray, edge_pids list, owning line mesh)
-    actor_lookup: Dict[Any, tuple] = {}
+    meshes: Dict[Any, tuple] = {}        # actor -> (cell_edge_index, line_mesh)
+    pids_by_actor: Dict[Any, list] = {}
     for _label, actor, mesh in edge_entries:
         cell_edge_index = mesh.cell_data.get("edge_index")
-        edge_pids_arr = mesh.field_data.get("edge_pids")
-        if cell_edge_index is None or edge_pids_arr is None:
+        edge_pids = mesh.field_data.get("edge_pids")
+        if cell_edge_index is None or edge_pids is None:
             continue
-        actor_lookup[actor] = (
-            np.asarray(cell_edge_index, dtype=np.int32),
-            [str(p) for p in edge_pids_arr],
-            mesh,
-        )
+        meshes[actor] = (np.asarray(cell_edge_index, dtype=np.int32), mesh)
+        pids_by_actor[actor] = [str(p) for p in edge_pids]
 
-    pid_to_actors: Dict[str, tuple] = {}
-    next_pick_n = [_next_auto_pick_number(pick_state['picks'], prefix="Edge")]
+    def resolve(x, y):
+        picker.Pick(x, y, 0, plotter.renderer)
+        cell_id = picker.GetCellId()
+        if cell_id < 0:
+            return None, None
+        info = meshes.get(picker.GetActor())
+        if info is None or cell_id >= len(info[0]):
+            return None, None
+        return picker.GetActor(), int(info[0][cell_id])
 
-    def _overlay_text() -> str:
-        if not pick_state['picks']:
-            if single:
-                return ("Edge picker: left-click an edge to select.\n"
-                        "Picking another edge replaces the selection.\n"
-                        "No edge selected yet.")
-            return ("Edge picker: left-click an edge to pick/unpick.\n"
-                    "Use the checkboxes on the left to hide/show parts.\n"
-                    "No edges picked yet.")
-        header = ("Selected edge (left-click another to replace):" if single
-                  else "Picked edges (left-click to toggle):")
-        lines = [header]
-        for pid, label in pick_state['picks']:
-            lines.append(f"  {label}  [{pid}]")
-        return "\n".join(lines)
-
-    _OVERLAY_NAME = 'edge_pick_overlay'
-    plotter.add_text(
-        _overlay_text(), position='upper_right', font_size=10,
-        color='yellow', shadow=True, name=_OVERLAY_NAME,
-    )
-
-    def _refresh_overlay():
-        # Re-add by name to update (see _setup_multi_face_picking's note).
-        plotter.add_text(
-            _overlay_text(), position='upper_right', font_size=10,
-            color='yellow', shadow=True, name=_OVERLAY_NAME,
-        )
-        plotter.render()
-
-    def _add_highlight(actor, edge_idx: int, pid: str, label: str) -> bool:
-        cell_edge_index, _pids, mesh = actor_lookup[actor]
-        cell_ids = np.where(cell_edge_index == edge_idx)[0]
+    def add_highlight(actor, idx, pid, label):
+        cell_edge_index, mesh = meshes[actor]
+        cell_ids = np.where(cell_edge_index == idx)[0]
         if len(cell_ids) == 0:
-            return False
+            return None
         sub = mesh.extract_cells(cell_ids)
         sub_actor = plotter.add_mesh(
             sub, color=PICK_HIGHLIGHT_COLOR, line_width=6,
             render_lines_as_tubes=True, lighting=False, pickable=False,
         )
-        # Billboarded label at the edge midpoint so the overlay's "Edge N" can
-        # be located on the model. Named for reliable removal across versions.
         centroid = np.asarray(sub.points, dtype=np.float64).mean(axis=0)
-        label_name = f"edge_pick_label_{pid}"
-        plotter.add_point_labels(
-            [centroid.tolist()],
-            [label],
-            font_size=14,
-            text_color='black',
-            shape='rect',
-            shape_color=PICK_HIGHLIGHT_COLOR,
-            shape_opacity=0.85,
-            show_points=False,
-            always_visible=True,
-            reset_camera=False,
-            name=label_name,
-        )
-        pid_to_actors[pid] = (sub_actor, label_name)
-        return True
+        return sub_actor, _add_pick_label(plotter, centroid, pid, label)
 
-    def _remove_pick(pid: str) -> None:
-        sub_actor, label_name = pid_to_actors.pop(pid)
-        plotter.remove_actor(sub_actor)
-        plotter.remove_actor(label_name)
-        pick_state['picks'] = [
-            (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
-        ]
-
-    def _toggle(actor, edge_idx: int) -> None:
-        info = actor_lookup.get(actor)
-        if info is None:
-            return
-        _cell_edge_index, edge_pids, _mesh = info
-        if edge_idx < 0 or edge_idx >= len(edge_pids):
-            return
-        pid = edge_pids[edge_idx]
-        if pid in pid_to_actors:
-            _remove_pick(pid)               # click the current pick -> deselect
-        else:
-            if single:
-                for prev in list(pid_to_actors):
-                    _remove_pick(prev)
-            label = "Edge 1" if single else f"Edge {next_pick_n[0]}"
-            if not _add_highlight(actor, edge_idx, pid, label):
-                return
-            if not single:
-                next_pick_n[0] += 1
-            pick_state['picks'].append((pid, label))
-        _refresh_overlay()
-
-    # Re-highlight any picks the caller passed in (reopening shows the existing
-    # selection with its original labels).
-    pid_to_location: Dict[str, tuple] = {}
-    for actor, (cell_edge_index, edge_pids, _mesh) in actor_lookup.items():
-        for idx, pid in enumerate(edge_pids):
-            pid_to_location[pid] = (actor, idx)
-    for pid, label in pick_state['picks']:
-        loc = pid_to_location.get(pid)
-        if loc is not None:
-            actor, idx = loc
-            _add_highlight(actor, idx, pid, label)
-
-    def _on_pick_click(x, y):
-        picker.Pick(x, y, 0, plotter.renderer)
-        cell_id = picker.GetCellId()
-        if cell_id < 0:
-            return
-        actor = picker.GetActor()
-        if actor is None or actor not in actor_lookup:
-            return
-        cell_edge_index, _pids, _mesh = actor_lookup[actor]
-        if cell_id >= len(cell_edge_index):
-            return
-        _toggle(actor, int(cell_edge_index[cell_id]))
-
-    _on_left_click(plotter, _on_pick_click)
-
+    _setup_picking(
+        plotter, pick_state, single, prefix="Edge", singular="edge",
+        plural="edges", pids_by_actor=pids_by_actor, resolve_pick=resolve,
+        add_highlight=add_highlight,
+    )
