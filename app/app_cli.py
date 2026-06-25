@@ -114,6 +114,11 @@ def _list_entities(core):
             c = a["centroid"]
             print(f"  {pid}: centroid [{c[0]:.4g}, {c[1]:.4g}, {c[2]:.4g}]"
                   f"  area={a.get('area', 0):.4g}")
+        for pid in (str(v) for v in fd.get("edge_pids", [])):
+            s = np.asarray(anchor_for_pick(md, pid)["samples"], dtype=float)
+            c = s.mean(axis=0)
+            print(f"  {pid}: near [{c[0]:.4g}, {c[1]:.4g}, {c[2]:.4g}]"
+                  f"  ({len(s)} pts)")
 
 
 def main(argv=None):

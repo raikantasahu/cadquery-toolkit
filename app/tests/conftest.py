@@ -39,6 +39,8 @@ def _build_models():
     return {
         "hertz": get_assembly_function(
             "hertzian_sphere_on_block_quarter_symmetry")(),
+        "cylhertz": get_assembly_function(
+            "hertzian_cylinder_on_block_quarter_symmetry")(),
         "hemisphere": get_part_function("hemisphere_sector")(
             radius=10.0, sweep_angle=360.0),
         "twocubes": _two_cubes(),

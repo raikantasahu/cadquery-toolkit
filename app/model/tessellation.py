@@ -9,11 +9,15 @@ Deliberately NOT re-exported from model/__init__.py, so ``from model import
 CADModelData`` stays free of pyvista/vtk (a layering-guard test enforces this).
 """
 
+import logging
+
 import numpy as np
 import pyvista as pv
 from typing import Any, Dict, List, Optional
 
 from model.CADModelData import _ci_get
+
+logger = logging.getLogger(__name__)
 
 
 # ── Helpers for reading CAD_ModelData ────────────────────────────────────────
@@ -42,6 +46,38 @@ def _transform_points(points: np.ndarray, matrix: List[float]) -> np.ndarray:
     R = M[:3, :3]
     t = M[:3, 3]
     return points @ R.T + t
+
+
+def _edge_polyline(edge: Dict[str, Any], pid: str, part_label: str):
+    """(k, 3) local-space points of one edge's discretized polyline, or None if
+    the edge carries too few points to form a polyline.
+
+    The points are the ``edge.discretize`` samples the converter already stored
+    (``vertexLocations``). A degenerate/empty edge is skipped *loudly* (naming
+    the edge + part) rather than silently dropped — it would otherwise vanish
+    from the picker with no trace (loud-safety-net convention)."""
+    vlocs = _ci_get(edge, "vertexLocations") or []
+    if len(vlocs) < 6 or len(vlocs) % 3 != 0:
+        logger.warning(
+            "edge %s on part %r has %d coordinate(s) (need a multiple of 3 and "
+            "at least 2 points); skipping it — it will not be pickable.",
+            pid, part_label, len(vlocs))
+        return None
+    return np.asarray(vlocs, dtype=np.float64).reshape(-1, 3)
+
+
+def _edge_samples(points: np.ndarray, max_samples: int = 5) -> List[tuple]:
+    """A few representative points along an edge polyline for the resolver:
+    always both endpoints, plus evenly spaced interior points (deduped). Enough
+    for ``resolve_edge``'s projection self-check on a curved edge, few enough to
+    stay cheap."""
+    n = len(points)
+    if n <= max_samples:
+        idx = range(n)
+    else:
+        idx = sorted({round(j * (n - 1) / (max_samples - 1))
+                      for j in range(max_samples)})
+    return [tuple(float(c) for c in points[i]) for i in idx]
 
 
 def _emit_face(
@@ -136,10 +172,11 @@ def _label_for(model: Dict[str, Any], component_name,
     return name if n == 1 else f"{name} #{n}"
 
 
-def _emit_part(model, transform, face_counter, vertex_counter, with_face_index):
+def _emit_part(model, transform, face_counter, vertex_counter, edge_counter,
+               with_face_index):
     """Build one PolyData from a single model's faces (world space), or None if
-    it has no geometry. ``face_counter``/``vertex_counter`` are boxed ints for
-    global F#/V# numbering across parts (traversal order)."""
+    it has no geometry. ``face_counter``/``vertex_counter``/``edge_counter`` are
+    boxed ints for global F#/V#/E# numbering across parts (traversal order)."""
     face_list = _ci_get(model, "faceList") or []
     if not face_list:
         return None
@@ -185,6 +222,33 @@ def _emit_part(model, transform, face_counter, vertex_counter, with_face_index):
                 np.asarray(vtx_xyz, dtype=np.float64), transform)
             mesh.field_data["vertex_points"] = pts_world.flatten()
             mesh.field_data["vertex_pids"] = np.asarray(vtx_pids, dtype=object)
+
+        # Topological edges (discretized polylines) for the edge picker,
+        # numbered globally E# in the same traversal order. Variable-length
+        # polylines are packed into one flat point buffer with a parallel
+        # offsets array (start index per edge, length n_edges + 1) so each edge
+        # slices out unambiguously: edge i is edge_points[offsets[i]:offsets[i+1]].
+        part_label = str(_ci_get(model, "componentName")
+                         or _ci_get(model, "modelName") or "part")
+        edge_pids: List[str] = []
+        edge_offsets: List[int] = [0]
+        edge_xyz: List[List[float]] = []
+        for edge in _ci_get(model, "edgeList") or []:
+            pid = f"E{edge_counter[0]}"
+            pts = _edge_polyline(edge, pid, part_label)
+            if pts is None:
+                continue
+            edge_counter[0] += 1
+            edge_pids.append(pid)
+            edge_xyz.extend(pts.tolist())
+            edge_offsets.append(len(edge_xyz))
+        if edge_pids:
+            pts_world = _transform_points(
+                np.asarray(edge_xyz, dtype=np.float64), transform)
+            mesh.field_data["edge_points"] = pts_world.flatten()
+            mesh.field_data["edge_offsets"] = np.asarray(
+                edge_offsets, dtype=np.int64)
+            mesh.field_data["edge_pids"] = np.asarray(edge_pids, dtype=object)
     return mesh
 
 
@@ -294,15 +358,16 @@ def create_polydatas_per_part(
     """
     parts: List[tuple] = []
     counts: Dict[str, int] = {}
-    # Faces and topological vertices are numbered globally in traversal order
-    # (F0/F1.. , V0/V1..) so they line up with the mesher's flat Gmsh tag
-    # enumeration after STEP import.
+    # Faces, topological vertices, and edges are numbered globally in traversal
+    # order (F0/F1.. , V0/V1.. , E0/E1..) so they line up with the mesher's flat
+    # Gmsh tag enumeration after STEP import.
     face_counter = [0]
     vertex_counter = [0]
+    edge_counter = [0]
 
     for model, component_name, transform in _iter_envelope(data):
         mesh = _emit_part(model, transform, face_counter, vertex_counter,
-                          with_face_index)
+                          edge_counter, with_face_index)
         if mesh is not None:
             parts.append((_label_for(model, component_name, counts), mesh))
 
@@ -315,11 +380,12 @@ def create_polydatas_per_part(
 def anchor_for_pick(data: Dict[str, Any], pid: str):
     """Geometric anchor for a picked entity PID, for the geometric resolver.
 
-    Bridges the GUI picker (which returns ``F#``/``V#`` PIDs) to the
-    source-agnostic resolver: returns a ``{'kind': ..., ...}`` anchor built from
-    the picked entity's geometry (vertex coordinate + owning part; face
-    area-weighted centroid + area + a few facet samples), so identity rides on
-    geometry, not on the PID. Returns ``None`` if the PID is not found.
+    Bridges the GUI picker / CLI listing (which return ``F#``/``V#``/``E#``
+    PIDs) to the source-agnostic resolver: returns a ``{'kind': ..., ...}``
+    anchor built from the referenced entity's geometry (vertex coordinate +
+    owning part; face area-weighted centroid + area + a few facet samples; edge
+    sample points along its polyline), so identity rides on geometry, not on the
+    PID. Returns ``None`` if the PID is not found.
     """
     for part_index, (_label, pd) in enumerate(
             create_polydatas_per_part(data, with_face_index=True)):
@@ -350,4 +416,12 @@ def anchor_for_pick(data: Dict[str, Any], pid: str):
                     "facet_samples": [tuple(float(c) for c in s)
                                       for s in centers[::step][:4]],
                 }
+        if pid.startswith("E") and "edge_pids" in fd:
+            epids = [str(v) for v in fd["edge_pids"]]
+            if pid in epids:
+                i = epids.index(pid)
+                pts = np.asarray(fd["edge_points"]).reshape(-1, 3)
+                offs = np.asarray(fd["edge_offsets"])
+                polyline = pts[offs[i]:offs[i + 1]]
+                return {"kind": "edge", "samples": _edge_samples(polyline)}
     return None
