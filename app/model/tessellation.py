@@ -425,3 +425,30 @@ def anchor_for_pick(data: Dict[str, Any], pid: str):
                 polyline = pts[offs[i]:offs[i + 1]]
                 return {"kind": "edge", "samples": _edge_samples(polyline)}
     return None
+
+
+def edge_lines_polydata(edge_points, edge_offsets, edge_pids) -> pv.PolyData:
+    """Pickable line PolyData from the flat edge buffers ``_emit_part`` surfaces.
+
+    One VTK polyline cell per edge, tagged with ``cell_data["edge_index"]`` (the
+    edge ordinal, parallel to the face picker's ``face_index``) and
+    ``field_data["edge_pids"]``, so a picked cell maps back to its ``E#``:
+    ``edge_pids[cell_data["edge_index"][picked_cell]]``. GTK-free so the viewer's
+    edge picker and the headless tests build it the same way.
+    """
+    pts = np.asarray(edge_points, dtype=np.float64).reshape(-1, 3)
+    offs = np.asarray(edge_offsets, dtype=np.int64)
+    lines: List[int] = []
+    edge_index: List[int] = []
+    for i in range(len(offs) - 1):
+        a, b = int(offs[i]), int(offs[i + 1])
+        if b - a < 2:
+            continue  # _emit_part already guarantees >= 2 points; be defensive
+        lines.append(b - a)
+        lines.extend(range(a, b))
+        edge_index.append(i)
+    poly = pv.PolyData(pts, lines=np.asarray(lines, dtype=np.int64))
+    poly.cell_data["edge_index"] = np.asarray(edge_index, dtype=np.int32)
+    poly.field_data["edge_pids"] = np.asarray(
+        [str(p) for p in edge_pids], dtype=object)
+    return poly

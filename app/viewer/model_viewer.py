@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from model.tessellation import (
     create_polydata_from_model_data,
     create_polydatas_per_part,
+    edge_lines_polydata,
 )
 from mesh_parts import split_grid_by_part
 
@@ -423,6 +424,163 @@ def _setup_multi_vertex_picking(plotter, vertex_entries, pick_state,
     _on_left_click(plotter, _on_pick_click)
 
 
+def _setup_multi_edge_picking(plotter, edge_entries, pick_state, single=False):
+    """Wire up edge picking across multiple part line actors.
+
+    Mirror of ``_setup_multi_face_picking`` for CAD edges: each part contributes
+    a line actor (one polyline cell per edge) carrying ``edge_index`` cell_data
+    and ``edge_pids`` field_data. A ``vtkCellPicker`` maps a clicked segment to
+    its cell, whose ``edge_index`` indexes the parallel ``edge_pids``. Picks
+    accumulate as ``(pid, label)`` in ``pick_state['picks']`` with auto labels
+    ``Edge N`` (a left drag rotates the camera instead).
+
+    Args:
+        plotter: The active pv.Plotter.
+        edge_entries: List of ``(label, actor, line_mesh)`` where ``line_mesh``
+            carries ``cell_data["edge_index"]`` + ``field_data["edge_pids"]``
+            (from ``edge_lines_polydata``).
+        pick_state: Dict with a ``picks`` list of ``(pid, label)``.
+        single: When True, only one edge may be selected at a time.
+    """
+    import vtk
+
+    picker = vtk.vtkCellPicker()
+    picker.SetTolerance(0.01)   # looser than faces — edges are thin curves
+
+    # vtkActor → (cell_edge_index ndarray, edge_pids list, owning line mesh)
+    actor_lookup: Dict[Any, tuple] = {}
+    for _label, actor, mesh in edge_entries:
+        cell_edge_index = mesh.cell_data.get("edge_index")
+        edge_pids_arr = mesh.field_data.get("edge_pids")
+        if cell_edge_index is None or edge_pids_arr is None:
+            continue
+        actor_lookup[actor] = (
+            np.asarray(cell_edge_index, dtype=np.int32),
+            [str(p) for p in edge_pids_arr],
+            mesh,
+        )
+
+    pid_to_actors: Dict[str, tuple] = {}
+    next_pick_n = [_next_auto_pick_number(pick_state['picks'], prefix="Edge")]
+
+    def _overlay_text() -> str:
+        if not pick_state['picks']:
+            if single:
+                return ("Edge picker: left-click an edge to select.\n"
+                        "Picking another edge replaces the selection.\n"
+                        "No edge selected yet.")
+            return ("Edge picker: left-click an edge to pick/unpick.\n"
+                    "Use the checkboxes on the left to hide/show parts.\n"
+                    "No edges picked yet.")
+        header = ("Selected edge (left-click another to replace):" if single
+                  else "Picked edges (left-click to toggle):")
+        lines = [header]
+        for pid, label in pick_state['picks']:
+            lines.append(f"  {label}  [{pid}]")
+        return "\n".join(lines)
+
+    _OVERLAY_NAME = 'edge_pick_overlay'
+    plotter.add_text(
+        _overlay_text(), position='upper_right', font_size=10,
+        color='yellow', shadow=True, name=_OVERLAY_NAME,
+    )
+
+    def _refresh_overlay():
+        # Re-add by name to update (see _setup_multi_face_picking's note).
+        plotter.add_text(
+            _overlay_text(), position='upper_right', font_size=10,
+            color='yellow', shadow=True, name=_OVERLAY_NAME,
+        )
+        plotter.render()
+
+    def _add_highlight(actor, edge_idx: int, pid: str, label: str) -> bool:
+        cell_edge_index, _pids, mesh = actor_lookup[actor]
+        cell_ids = np.where(cell_edge_index == edge_idx)[0]
+        if len(cell_ids) == 0:
+            return False
+        sub = mesh.extract_cells(cell_ids)
+        sub_actor = plotter.add_mesh(
+            sub, color=PICK_HIGHLIGHT_COLOR, line_width=6,
+            render_lines_as_tubes=True, lighting=False, pickable=False,
+        )
+        # Billboarded label at the edge midpoint so the overlay's "Edge N" can
+        # be located on the model. Named for reliable removal across versions.
+        centroid = np.asarray(sub.points, dtype=np.float64).mean(axis=0)
+        label_name = f"edge_pick_label_{pid}"
+        plotter.add_point_labels(
+            [centroid.tolist()],
+            [label],
+            font_size=14,
+            text_color='black',
+            shape='rect',
+            shape_color=PICK_HIGHLIGHT_COLOR,
+            shape_opacity=0.85,
+            show_points=False,
+            always_visible=True,
+            reset_camera=False,
+            name=label_name,
+        )
+        pid_to_actors[pid] = (sub_actor, label_name)
+        return True
+
+    def _remove_pick(pid: str) -> None:
+        sub_actor, label_name = pid_to_actors.pop(pid)
+        plotter.remove_actor(sub_actor)
+        plotter.remove_actor(label_name)
+        pick_state['picks'] = [
+            (p, lbl) for (p, lbl) in pick_state['picks'] if p != pid
+        ]
+
+    def _toggle(actor, edge_idx: int) -> None:
+        info = actor_lookup.get(actor)
+        if info is None:
+            return
+        _cell_edge_index, edge_pids, _mesh = info
+        if edge_idx < 0 or edge_idx >= len(edge_pids):
+            return
+        pid = edge_pids[edge_idx]
+        if pid in pid_to_actors:
+            _remove_pick(pid)               # click the current pick -> deselect
+        else:
+            if single:
+                for prev in list(pid_to_actors):
+                    _remove_pick(prev)
+            label = "Edge 1" if single else f"Edge {next_pick_n[0]}"
+            if not _add_highlight(actor, edge_idx, pid, label):
+                return
+            if not single:
+                next_pick_n[0] += 1
+            pick_state['picks'].append((pid, label))
+        _refresh_overlay()
+
+    # Re-highlight any picks the caller passed in (reopening shows the existing
+    # selection with its original labels).
+    pid_to_location: Dict[str, tuple] = {}
+    for actor, (cell_edge_index, edge_pids, _mesh) in actor_lookup.items():
+        for idx, pid in enumerate(edge_pids):
+            pid_to_location[pid] = (actor, idx)
+    for pid, label in pick_state['picks']:
+        loc = pid_to_location.get(pid)
+        if loc is not None:
+            actor, idx = loc
+            _add_highlight(actor, idx, pid, label)
+
+    def _on_pick_click(x, y):
+        picker.Pick(x, y, 0, plotter.renderer)
+        cell_id = picker.GetCellId()
+        if cell_id < 0:
+            return
+        actor = picker.GetActor()
+        if actor is None or actor not in actor_lookup:
+            return
+        cell_edge_index, _pids, _mesh = actor_lookup[actor]
+        if cell_id >= len(cell_edge_index):
+            return
+        _toggle(actor, int(cell_edge_index[cell_id]))
+
+    _on_left_click(plotter, _on_pick_click)
+
+
 def _add_visibility_checkboxes(plotter, part_entries,
                                extra_actors_by_label=None):
     """Add a column of checkbox widgets to toggle each part's visibility.
@@ -579,8 +737,10 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
             closes.
         pick_mode: ``"faces"`` (default) picks CAD faces; ``"vertices"``
             renders each part's topological vertices as a pickable point
-            cloud (faces become non-pickable context) and picks those. In
-            both modes a left-click toggles the entity under the cursor.
+            cloud (faces become non-pickable context) and picks those;
+            ``"edges"`` renders each part's edges as pickable line actors and
+            picks those. In every mode a left-click toggles the entity under
+            the cursor.
 
     This is a blocking call — it returns when the viewer window is closed.
     """
@@ -603,11 +763,12 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
 
     _setup_scene(plotter, _combined_bounds(m for _label, m in parts))
 
-    # In vertex mode, build a pickable point cloud per part (faces become
-    # context only) BEFORE the checkboxes, so each checkbox can toggle the
-    # part's faces and its vertices together.
+    # In vertex/edge mode, build the pickable entity actors per part (faces
+    # become context only) BEFORE the checkboxes, so each checkbox toggles the
+    # part's faces and its picked-entity actor together.
     vertex_entries: List[tuple] = []
-    vertex_actor_by_label: Dict[str, Any] = {}
+    edge_entries: List[tuple] = []
+    extra_actors_by_label: Dict[str, Any] = {}
     if pick_state is not None and pick_mode == "vertices":
         for label, actor, mesh in part_entries:
             actor.PickableOff()
@@ -620,24 +781,43 @@ def show_pick_viewer(parts, title="Pick Faces", pick_state=None,
                 points, color='#ff5252', render_points_as_spheres=True,
                 point_size=11,
             )
-            vertex_actor_by_label[label] = vtx_actor
+            extra_actors_by_label[label] = vtx_actor
             vertex_entries.append(
                 (label, vtx_actor, points, [str(p) for p in vpids]),
             )
+    elif pick_state is not None and pick_mode == "edges":
+        for label, actor, mesh in part_entries:
+            actor.PickableOff()
+            ep = mesh.field_data.get("edge_points")
+            eo = mesh.field_data.get("edge_offsets")
+            epids = mesh.field_data.get("edge_pids")
+            if ep is None or eo is None or epids is None or len(epids) == 0:
+                continue
+            line_mesh = edge_lines_polydata(ep, eo, epids)
+            edge_actor = plotter.add_mesh(
+                line_mesh, color='#ff5252', line_width=3,
+                render_lines_as_tubes=True, lighting=False,
+            )
+            extra_actors_by_label[label] = edge_actor
+            edge_entries.append((label, edge_actor, line_mesh))
 
     _add_visibility_checkboxes(
-        plotter, part_entries, extra_actors_by_label=vertex_actor_by_label,
+        plotter, part_entries, extra_actors_by_label=extra_actors_by_label,
     )
 
     if pick_state is not None and pick_mode == "vertices":
         _setup_multi_vertex_picking(plotter, vertex_entries, pick_state,
                                     single=single)
+    elif pick_state is not None and pick_mode == "edges":
+        _setup_multi_edge_picking(plotter, edge_entries, pick_state,
+                                  single=single)
     elif pick_state is not None:
         _setup_multi_face_picking(plotter, part_entries, pick_state,
                                   single=single)
 
-    pick_help = ("Left-click=Pick vertex" if pick_mode == "vertices"
-                 else "Left-click=Pick face")
+    pick_help = {"vertices": "Left-click=Pick vertex",
+                 "edges": "Left-click=Pick edge"}.get(
+                     pick_mode, "Left-click=Pick face")
     plotter.add_text(
         "Views: F=Front  B=Back  L=Left  G=Right  T=Top  U=Bottom  I=Iso\n"
         f"R=Reset  {pick_help}  Q=Close",
@@ -932,8 +1112,9 @@ class ModelViewer(GObject.Object):
                 holds the user's selection as ``[(persistent_id, label)]``.
             initial_picks: Optional list of ``(persistent_id, label)`` to
                 pre-populate; only respected when ``pick_faces`` is True.
-            pick_mode: ``"faces"`` (default) or ``"vertices"`` — which entity
-                type to pick. Only meaningful when ``pick_faces`` is True.
+            pick_mode: ``"faces"`` (default), ``"vertices"``, or ``"edges"`` —
+                which entity type to pick. Only meaningful when ``pick_faces``
+                is True. After close, read the matching ``picked_*`` property.
             single: When True, restrict picking to one entity at a time (a new
                 pick replaces the previous). Only meaningful when ``pick_faces``.
         """
@@ -1032,6 +1213,15 @@ class ModelViewer(GObject.Object):
     @property
     def picked_vertices(self) -> List[tuple]:
         """Return the most recent picks after a ``pick_mode="vertices"`` run.
+
+        Alias of the same underlying ``_last_picks`` (a viewer instance only
+        ever runs one pick mode), named for clarity at the call site.
+        """
+        return list(self._last_picks)
+
+    @property
+    def picked_edges(self) -> List[tuple]:
+        """Return the most recent picks after a ``pick_mode="edges"`` run.
 
         Alias of the same underlying ``_last_picks`` (a viewer instance only
         ever runs one pick mode), named for clarity at the call site.

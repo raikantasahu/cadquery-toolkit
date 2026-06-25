@@ -16,7 +16,8 @@ import numpy as np
 from helpers import cadmodeldata
 from models.parts import get_part_function
 from models.assemblies import get_assembly_function
-from model.tessellation import anchor_for_pick, create_polydatas_per_part
+from model.tessellation import (
+    anchor_for_pick, create_polydatas_per_part, edge_lines_polydata)
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -93,6 +94,35 @@ def test_edge_anchor_shape_and_on_edge():
 def test_unknown_edge_pid_misses():
     md = _box_md()
     assert anchor_for_pick(md, "E9999") is None
+
+
+# ── P2 viewer data — edge_lines_polydata (the pickable line geometry) ───────
+
+def test_edge_lines_polydata_maps_cells_to_pids():
+    """The GTK-free builder the edge picker renders: one polyline cell per edge,
+    cell_data['edge_index'] -> edge_pids gives the picked E#, and each cell's
+    points reconstruct that edge's polyline."""
+    _label, pd = create_polydatas_per_part(_box_md(), with_face_index=True)[0]
+    fd = pd.field_data
+    ep, eo = np.asarray(fd["edge_points"]).reshape(-1, 3), np.asarray(
+        fd["edge_offsets"])
+    epids = [str(v) for v in fd["edge_pids"]]
+
+    lines = edge_lines_polydata(ep, eo, epids)
+    assert lines.n_cells == len(epids) == 12
+    cell_edge_index = np.asarray(lines.cell_data["edge_index"])
+    out_pids = [str(p) for p in lines.field_data["edge_pids"]]
+    assert out_pids == epids
+
+    # a picked cell maps to the right E#, and its points are that edge's polyline
+    for cell_id in range(lines.n_cells):
+        edge_idx = int(cell_edge_index[cell_id])
+        assert out_pids[edge_idx] == epids[edge_idx]
+        want = ep[eo[edge_idx]:eo[edge_idx + 1]]
+        got = lines.extract_cells(cell_id).points
+        # same set of points (cell is the polyline through the edge's samples)
+        assert len(got) == len(want)
+        assert np.allclose(np.sort(got, axis=0), np.sort(want, axis=0))
 
 
 # ── T3 — identity is stable / repeatable ────────────────────────────────────
