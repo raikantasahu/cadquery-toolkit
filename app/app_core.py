@@ -9,6 +9,7 @@ wrappers; the core **raises** typed errors and the wrappers present them.
 See docs/plans/Core-UI-Separation.md.
 """
 import inspect
+import logging
 from typing import Optional
 
 import cadquery as cq
@@ -26,6 +27,8 @@ from model.tessellation import (
 from models.parts import get_all_parts
 from models.assemblies import get_all_assemblies
 
+logger = logging.getLogger(__name__)
+
 
 class AppError(Exception):
     """A core operation failed for a user-facing reason (no model, an
@@ -42,6 +45,7 @@ class AppCore:
         self._model_data = None            # cached CADModelData dict
         self._face_owners: list = []       # [(pid, label)]
         self._vertex_owners: list = []     # [(pid, label)]
+        self._edge_owners: list = []       # [(pid, label)]
         self._mesh = None
         self._stats = None
 
@@ -108,6 +112,7 @@ class AppCore:
         self._model_data = None
         self._face_owners = []
         self._vertex_owners = []
+        self._edge_owners = []
 
     # ---------- selection state (owners for mesh-entity containers) ----------
     def set_face_owners(self, items):
@@ -116,16 +121,28 @@ class AppCore:
     def set_vertex_owners(self, items):
         self._vertex_owners = list(items or [])
 
+    def set_edge_owners(self, items):
+        self._edge_owners = list(items or [])
+
     def selection_anchors(self):
         """``(selections, entity_owners)`` for a MeshData save. Picked
-        faces/vertices become geometric resolver selections; per-part ``P{i}``
-        fragment owners stay legacy (part order is preserved)."""
+        faces/vertices/edges become geometric resolver selections; per-part
+        ``P{i}`` fragment owners stay legacy (part order is preserved)."""
         md = self.model_data()
         selections = []
-        for pid, label in (self._face_owners + self._vertex_owners):
+        for pid, label in (self._face_owners + self._vertex_owners
+                           + self._edge_owners):
             anchor = anchor_for_pick(md, pid)
-            if anchor is not None:
-                selections.append((anchor, label))
+            if anchor is None:
+                # A pick that no longer resolves (a stale/unknown PID after the
+                # model changed) is dropped — loudly, naming it, so a missing
+                # container can't pass for "no such entity" (loud-safety-net).
+                logger.warning(
+                    "owner %r references %s, which does not resolve on the "
+                    "current model — dropping it (no container written).",
+                    label, pid)
+                continue
+            selections.append((anchor, label))
         entity_owners: dict = {}
         try:
             for i, label in enumerate(enumerate_part_labels(md)):

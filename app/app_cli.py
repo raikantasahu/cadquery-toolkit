@@ -22,6 +22,7 @@ CADModelData PID (F#/V#, deterministic for a registry model — use
     owners:                                              # optional
       - {kind: face, pid: F8, label: fixed-bottom}
       - {kind: vertex, pid: V0, label: contact}
+      - {kind: edge, pid: E5, label: contact-line}
     output: {format: meshdata_json}                      # json | meshdata_json | msh
 """
 import argparse
@@ -84,7 +85,7 @@ def _mesh_config(mesh_cfg, error):
 
 
 def _apply_owners(core, owners_cfg, parser):
-    face_owners, vertex_owners = [], []
+    face_owners, vertex_owners, edge_owners = [], [], []
     for o in owners_cfg or []:
         kind, pid, label = o.get("kind"), o.get("pid"), o.get("label")
         if not (kind and pid and label):
@@ -93,10 +94,13 @@ def _apply_owners(core, owners_cfg, parser):
             face_owners.append((pid, label))
         elif kind == "vertex":
             vertex_owners.append((pid, label))
+        elif kind == "edge":
+            edge_owners.append((pid, label))
         else:
-            parser.error(f"owner kind must be face|vertex (got {kind!r})")
+            parser.error(f"owner kind must be face|vertex|edge (got {kind!r})")
     core.set_face_owners(face_owners)
     core.set_vertex_owners(vertex_owners)
+    core.set_edge_owners(edge_owners)
 
 
 def _list_entities(core):

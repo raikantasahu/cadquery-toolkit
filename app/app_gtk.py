@@ -705,6 +705,7 @@ class CadQueryApp(Gtk.Window):
                 return
             self._core.set_face_owners(self._picked_faces)
             self._core.set_vertex_owners(self._picked_vertices)
+            self._core.set_edge_owners(self._picked_edges)
         try:
             self._core.save_mesh(filename, fmt, model_name=model_name)
         except Exception as e:
