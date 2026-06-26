@@ -19,6 +19,7 @@ CADModelData PID (F#/V#, deterministic for a registry model — use
       extrusion: {capFace: F4, numLayers: 3}            # optional
       refinements:                                       # optional
         - {scope: contact, vertexPid: V2, fineSize: 0.5, radius: 2.0}
+        - {scope: contact, edgePid: E5, fineSize: 0.3, radius: 2.0}
     owners:                                              # optional
       - {kind: face, pid: F8, label: fixed-bottom}
       - {kind: vertex, pid: V0, label: contact}
@@ -70,11 +71,17 @@ def _mesh_config(mesh_cfg, error):
     if ex:
         core_ex = {"cap_face": ex.get("capFace"),
                    "num_layers": int(ex.get("numLayers", 1))}
-    refinements = [
-        {"scope": r["scope"], "vertex_pid": r["vertexPid"],
-         "fine_size": float(r["fineSize"]), "radius": float(r["radius"])}
-        for r in mesh_cfg.get("refinements", [])
-    ]
+    refinements = []
+    for r in mesh_cfg.get("refinements", []):
+        region = {"scope": r["scope"], "fine_size": float(r["fineSize"]),
+                  "radius": float(r["radius"])}
+        if r.get("edgePid"):
+            region["edge_pid"] = r["edgePid"]
+        else:
+            region["vertex_pid"] = r["vertexPid"]
+        if r.get("part") is not None:
+            region["part_index"] = int(r["part"])
+        refinements.append(region)
     return {
         "mesh_type": element_type,
         "element_size": element_size,

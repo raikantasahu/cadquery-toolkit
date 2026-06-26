@@ -163,6 +163,13 @@ class AppCore:
             return (anchor["at"], anchor["part"])
         return None
 
+    def edge_anchor(self, pid):
+        """Picked edge PID -> sample points along the edge (or None)."""
+        anchor = anchor_for_pick(self.model_data(), pid)
+        if anchor and anchor.get("kind") == "edge":
+            return anchor["samples"]
+        return None
+
     # ---------- mesh ----------
     def mesh(self, config: dict) -> dict:
         """Build specs from ``config`` (resolving cap face + refinement vertices
@@ -200,6 +207,22 @@ class AppCore:
     def _build_refinements(self, regions) -> list:
         specs = []
         for region in regions:
+            scope = region["scope"]
+            if region.get("edge_pid"):
+                samples = self.edge_anchor(region["edge_pid"])
+                if samples is None:
+                    raise AppError(
+                        f"Refinement edge {region['edge_pid']} could not be "
+                        "resolved on the current model.")
+                # Edges aren't part-disambiguated by the anchor, so a local edge
+                # refinement takes its body from an explicit part_index (or the
+                # mesher defaults to the first resolved curve's volume).
+                specs.append(RefinementSpec(
+                    edge_samples=samples, fine_size=region["fine_size"],
+                    radius=region["radius"], scope=scope,
+                    part_index=region.get("part_index") if scope == "local"
+                    else None))
+                continue
             anchor = self.vertex_anchor(region["vertex_pid"])
             if anchor is None:
                 raise AppError(
@@ -208,8 +231,8 @@ class AppCore:
             coord, part_index = anchor
             specs.append(RefinementSpec(
                 at=coord, fine_size=region["fine_size"],
-                radius=region["radius"], scope=region["scope"],
-                part_index=part_index if region["scope"] == "local" else None))
+                radius=region["radius"], scope=scope,
+                part_index=part_index if scope == "local" else None))
         return specs
 
     def has_mesh(self) -> bool:

@@ -16,15 +16,16 @@ Example config (mesh_config.yaml):
       elementType: tet4             # tet4, tet10, hex8, hex20, hex27
       elementSize: 5.0
       relativeSagTolerance: 0.01    # optional; max sag/radius on curved faces
-      # Optional local refinement around a point (tet/recombined-hex).
-      # Anchored by coordinate (portable across the CAD->gmsh boundary).
-      localRefinement:              # refine only one part near the point
+      # Optional refinement (tet/recombined-hex), anchored by coordinate
+      # (portable across the CAD->gmsh boundary): 'at' = a point/vertex,
+      # 'samples' = points along an edge (refine from the whole curve).
+      localRefinement:              # refine only one part near the anchor
         at: [0, 0, -10]
         fineSize: 0.1
         radius: 2.0
         part: 0                     # optional: 0-based part to confine to
-      contactRefinement:            # refine all parts near the point
-        at: [0, 0, -10]
+      contactRefinement:            # refine all parts near the anchor
+        samples: [[0, 0, -10], [0, 20, -10]]   # an edge (contact line)
         fineSize: 0.05
         radius: 1.0
 
@@ -56,9 +57,10 @@ def _parse_refinements(mesh_cfg, parser):
     """Build RefinementSpec list from mesh.localRefinement / contactRefinement.
 
     Each key may hold one entry (a dict) or several (a list of dicts). Every
-    entry needs ``at: [x, y, z]`` plus positive ``fineSize`` and ``radius``.
-    ``localRefinement`` may add ``part`` (0-based volume index) to disambiguate
-    a coordinate shared by several parts.
+    entry needs positive ``fineSize`` and ``radius`` plus an anchor: ``at:
+    [x, y, z]`` for a vertex (point) refinement, or ``samples: [[x,y,z], ...]``
+    (>= 2 points) for an edge (curve) refinement. ``localRefinement`` may add
+    ``part`` (0-based volume index) to pick the body to confine it to.
     """
     specs = []
     for key, scope in (("localRefinement", "local"),
@@ -70,29 +72,54 @@ def _parse_refinements(mesh_cfg, parser):
         for entry in entries:
             if not isinstance(entry, dict):
                 parser.error(f"mesh.{key} must be a mapping (or list of them)")
-            at = entry.get("at")
-            if not (isinstance(at, (list, tuple)) and len(at) == 3):
-                parser.error(f"mesh.{key} requires 'at: [x, y, z]'")
             try:
-                at = tuple(float(v) for v in at)
                 fine_size = float(entry["fineSize"])
                 radius = float(entry["radius"])
             except (KeyError, TypeError, ValueError):
-                parser.error(
-                    f"mesh.{key} requires numeric 'at', 'fineSize', 'radius'")
+                parser.error(f"mesh.{key} requires numeric 'fineSize', 'radius'")
             if fine_size <= 0 or radius <= 0:
                 parser.error(
                     f"mesh.{key}: 'fineSize' and 'radius' must be positive")
-            part = entry.get("part")
-            if part is not None:
+            part = _parse_refine_part(entry, key, parser)
+
+            samples = entry.get("samples")
+            if samples is not None:
+                if not (isinstance(samples, list) and len(samples) >= 2):
+                    parser.error(
+                        f"mesh.{key}: 'samples' must be a list of >= 2 [x,y,z]")
                 try:
-                    part = int(part)
+                    samples = [tuple(float(c) for c in s) for s in samples]
                 except (TypeError, ValueError):
-                    parser.error(f"mesh.{key}: 'part' must be an integer index")
+                    parser.error(f"mesh.{key}: 'samples' must be [x,y,z] points")
+                specs.append(RefinementSpec(
+                    edge_samples=samples, fine_size=fine_size, radius=radius,
+                    scope=scope, part_index=part))
+                continue
+
+            at = entry.get("at")
+            if not (isinstance(at, (list, tuple)) and len(at) == 3):
+                parser.error(
+                    f"mesh.{key} requires 'at: [x, y, z]' (or 'samples' for an "
+                    f"edge)")
+            try:
+                at = tuple(float(v) for v in at)
+            except (TypeError, ValueError):
+                parser.error(f"mesh.{key}: 'at' must be numeric [x, y, z]")
             specs.append(RefinementSpec(
                 at=at, fine_size=fine_size, radius=radius, scope=scope,
                 part_index=part))
     return specs
+
+
+def _parse_refine_part(entry, key, parser):
+    """Optional 0-based ``part`` (volume index) for a refinement entry, or None."""
+    part = entry.get("part")
+    if part is None:
+        return None
+    try:
+        return int(part)
+    except (TypeError, ValueError):
+        parser.error(f"mesh.{key}: 'part' must be an integer index")
 
 
 def _parse_owners(owners_cfg, parser):
