@@ -214,19 +214,31 @@ class RefinementSpec:
                           points at that location (one per touching body, e.g.
                           a contact point) and applied globally.
 
+    An edge anchor is the curve analog: set ``edge_samples`` (points along the
+    edge, from the geometric resolver's edge anchor) instead of ``at``, and the
+    Distance field is sourced from the resolved curve(s) (``CurvesList``) rather
+    than points — element size ramps from ``fine_size`` *along the whole edge* up
+    to ``element_size`` by ``radius`` away. ``scope`` works the same: "contact"
+    refines every body the edge resolves to (the contact line on both), "local"
+    restricts to one body's volume.
+
     Fields:
-        at:         (x, y, z) anchor coordinate (world space).
+        at:           (x, y, z) anchor coordinate (world space); vertex anchor.
+        edge_samples: points along an edge (world space); edge anchor. Exactly
+                      one of ``at`` / ``edge_samples`` is used (edge takes
+                      precedence when set).
         fine_size:  element size at the anchor (Threshold SizeMin).
         radius:     distance over which size relaxes back to ``element_size``
                     (Threshold DistMax / SizeMax).
         scope:      "local" or "contact".
         part_index: 0-based volume to confine local refinement to (optional).
     """
-    at: tuple
-    fine_size: float
-    radius: float
+    at: tuple = None
+    fine_size: float = 0.0
+    radius: float = 0.0
     scope: str = "contact"
     part_index: Optional[int] = None
+    edge_samples: Optional[list] = None
 
 
 @dataclass
@@ -771,53 +783,28 @@ class GmshMesher:
                                 element_size: float) -> int:
         """Build one refinement field from a ``RefinementSpec``; return its tag.
 
-        Distance (from the anchor point set) -> Threshold (graded size), and for
-        ``scope="local"`` a Restrict that confines it to one part's volume.
+        Distance (from the anchor's points OR curves) -> Threshold (graded size),
+        and for ``scope="local"`` a Restrict that confines it to one part's
+        volume. A vertex anchor (``spec.at``) sources the Distance from
+        ``PointsList``; an edge anchor (``spec.edge_samples``) from ``CurvesList``
+        (the resolved curve(s), sampled at ~``fine_size`` spacing so the fine
+        band is uniform along the whole edge).
         """
         if spec.fine_size <= 0 or spec.radius <= 0:
             raise MeshValidationError(
                 "refinement fine_size and radius must be positive.")
-        from .resolver import EntityResolutionError
 
-        # Anchor by coordinate via the shared geometric resolver (namespace-
-        # independent; returns the whole coincident set, one vertex per body).
-        try:
-            near = self._resolver.resolve_vertex(spec.at)
-        except EntityResolutionError:
-            raise MeshValidationError(
-                f"refinement anchor {tuple(spec.at)} matches no model vertex.")
-
-        target_vol = None
-        if spec.scope == "contact":
-            # Every point at the anchor (one per body meeting there) so all
-            # touching parts refine from a single picked vertex.
-            points = near
-        elif spec.scope == "local":
-            if spec.part_index is not None:
-                vols = gmsh.model.getEntities(3)
-                if not 0 <= spec.part_index < len(vols):
-                    raise MeshValidationError(
-                        f"refinement part_index {spec.part_index} out of range "
-                        f"(0..{len(vols) - 1}).")
-                target_vol = vols[spec.part_index][1]
-                try:
-                    points = self._resolver.resolve_vertex(
-                        spec.at, volume=target_vol)
-                except EntityResolutionError:
-                    raise MeshValidationError(
-                        f"refinement anchor {tuple(spec.at)} has no vertex on "
-                        f"part {spec.part_index}.")
-            else:
-                points = near[:1]
-                target_vol = next(
-                    iter(self._resolver.volumes_of_vertex(points[0])), None)
+        if spec.edge_samples is not None:
+            list_kind, entities, sampling, target_vol = (
+                self._edge_refine_targets(spec))
         else:
-            raise MeshValidationError(
-                f"refinement scope must be 'local' or 'contact', "
-                f"got {spec.scope!r}.")
+            list_kind, entities, sampling, target_vol = (
+                self._point_refine_targets(spec))
 
         fd = gmsh.model.mesh.field.add("Distance")
-        gmsh.model.mesh.field.setNumbers(fd, "PointsList", points)
+        gmsh.model.mesh.field.setNumbers(fd, list_kind, entities)
+        if sampling is not None:
+            gmsh.model.mesh.field.setNumber(fd, "Sampling", sampling)
         ft = gmsh.model.mesh.field.add("Threshold")
         gmsh.model.mesh.field.setNumber(ft, "InField", fd)
         gmsh.model.mesh.field.setNumber(ft, "SizeMin", spec.fine_size)
@@ -829,12 +816,94 @@ class GmshMesher:
 
         if target_vol is None:
             raise MeshValidationError(
-                f"local refinement anchor {tuple(spec.at)} is not on any part "
-                f"(volume).")
+                "local refinement anchor is not on any part (volume).")
         fr = gmsh.model.mesh.field.add("Restrict")
         gmsh.model.mesh.field.setNumber(fr, "InField", ft)
         gmsh.model.mesh.field.setNumbers(fr, "VolumesList", [target_vol])
         return fr
+
+    def _point_refine_targets(self, spec: "RefinementSpec"):
+        """Vertex anchor -> ``("PointsList", point_tags, None, target_vol)``.
+
+        Resolves ``spec.at`` to the coincident vertex set (one per touching
+        body); ``contact`` uses them all (no volume restriction), ``local``
+        narrows to one part's vertex + volume.
+        """
+        from .resolver import EntityResolutionError
+        try:
+            near = self._resolver.resolve_vertex(spec.at)
+        except EntityResolutionError:
+            raise MeshValidationError(
+                f"refinement anchor {tuple(spec.at)} matches no model vertex.")
+        if spec.scope == "contact":
+            return "PointsList", near, None, None
+        if spec.scope == "local":
+            if spec.part_index is not None:
+                target_vol = self._volume_by_index(spec.part_index)
+                try:
+                    points = self._resolver.resolve_vertex(
+                        spec.at, volume=target_vol)
+                except EntityResolutionError:
+                    raise MeshValidationError(
+                        f"refinement anchor {tuple(spec.at)} has no vertex on "
+                        f"part {spec.part_index}.")
+                return "PointsList", points, None, target_vol
+            points = near[:1]
+            target_vol = next(
+                iter(self._resolver.volumes_of_vertex(points[0])), None)
+            return "PointsList", points, None, target_vol
+        raise MeshValidationError(
+            f"refinement scope must be 'local' or 'contact', got {spec.scope!r}.")
+
+    def _edge_refine_targets(self, spec: "RefinementSpec"):
+        """Edge anchor -> ``("CurvesList", curve_tags, sampling, target_vol)``.
+
+        Resolves ``spec.edge_samples`` to the coincident curve set (one per
+        touching body) and picks ``Sampling`` so each curve is sampled at
+        ~``fine_size`` spacing (uniform fine band along the whole edge — coarser
+        sampling leaves it lumpy). ``contact`` uses all curves unrestricted;
+        ``local`` restricts to one body's volume.
+        """
+        from .resolver import EntityResolutionError
+        try:
+            curves = self._resolver.resolve_edge(spec.edge_samples)
+        except EntityResolutionError:
+            raise MeshValidationError(
+                "edge refinement anchor matches no model curve.")
+        longest = max(gmsh.model.occ.getMass(1, c) for c in curves)
+        sampling = max(20, int(math.ceil(longest / spec.fine_size)))
+        if spec.scope == "contact":
+            return "CurvesList", curves, sampling, None
+        if spec.scope == "local":
+            if spec.part_index is not None:
+                target_vol = self._volume_by_index(spec.part_index)
+            else:
+                target_vol = next(
+                    iter(self._volumes_of_curve(curves[0])), None)
+            return "CurvesList", curves, sampling, target_vol
+        raise MeshValidationError(
+            f"refinement scope must be 'local' or 'contact', got {spec.scope!r}.")
+
+    @staticmethod
+    def _volume_by_index(part_index: int) -> int:
+        """gmsh volume tag for a 0-based part index (assembly order)."""
+        vols = gmsh.model.getEntities(3)
+        if not 0 <= part_index < len(vols):
+            raise MeshValidationError(
+                f"refinement part_index {part_index} out of range "
+                f"(0..{len(vols) - 1}).")
+        return vols[part_index][1]
+
+    @staticmethod
+    def _volumes_of_curve(curve_tag: int) -> set:
+        """Volume tags whose boundary includes ``curve_tag`` (curve -> surfaces
+        -> volumes via adjacencies) — the curve analog of ``volumes_of_vertex``."""
+        vols = set()
+        surfaces, _ = gmsh.model.getAdjacencies(1, curve_tag)
+        for surf in surfaces:
+            up, _ = gmsh.model.getAdjacencies(2, int(surf))
+            vols.update(int(v) for v in up)
+        return vols
 
     # All hex types share the recombine-from-tet-subdivision path and the
     # same curvature-under-resolution failure mode (verified for HEX8/20/27).
