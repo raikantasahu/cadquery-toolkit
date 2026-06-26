@@ -14,12 +14,15 @@ from gi.repository import Gdk, Gtk
 # Custom dialog responses. The caller closes the dialog, runs a picker, and
 # reopens with ``initial`` + ``refinements`` set so other settings survive the
 # round-trip.
-RESPONSE_PICK_CAP = 1        # pick the extruded-hex cap face
-RESPONSE_ADD_LOCAL = 2       # pick a vertex, add a local refinement region
-RESPONSE_ADD_CONTACT = 3     # pick a vertex, add a contact refinement region
+RESPONSE_PICK_CAP = 1          # pick the extruded-hex cap face
+RESPONSE_ADD_LOCAL = 2         # pick a vertex, add a local refinement region
+RESPONSE_ADD_CONTACT = 3       # pick a vertex, add a contact refinement region
+RESPONSE_ADD_LOCAL_EDGE = 4    # pick an edge, add a local refinement region
+RESPONSE_ADD_CONTACT_EDGE = 5  # pick an edge, add a contact refinement region
 
-# Refinement-region table columns.
-_COL_SCOPE, _COL_VERTEX, _COL_FINE, _COL_RADIUS, _COL_LABEL = range(5)
+# Refinement-region table columns. The anchor is a vertex (V#) or edge (E#)
+# PID; _COL_KIND records which so a region serializes to vertex_pid/edge_pid.
+_COL_SCOPE, _COL_ANCHOR, _COL_FINE, _COL_RADIUS, _COL_LABEL, _COL_KIND = range(6)
 
 
 def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None):
@@ -28,8 +31,10 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
     Args:
         parent: Parent GTK window.
         cap_face_pid: PersistentID of the cap face for extruded hex, or None.
-        refinements: List of refinement-region dicts to populate the table,
-            each ``{scope, vertex_pid, vertex_label, fine_size, radius}``.
+        refinements: List of refinement-region dicts to populate the table, each
+            ``{scope, fine_size, radius}`` plus an anchor — ``vertex_pid`` +
+            ``vertex_label`` for a vertex, or ``edge_pid`` + ``edge_label`` for
+            an edge.
         initial: Optional dict of prior non-refinement field values to restore
             so settings survive a "Pick…" / "Add…" round-trip.
 
@@ -124,26 +129,30 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
     refine_page = _page("Refinement")
     hint = Gtk.Label()
     hint.set_markup(
-        "<small>Fine mesh near a vertex, coarse away. Add regions, then edit "
-        "Fine Size / Refine Radius inline.</small>")
+        "<small>Fine mesh near a vertex or along an edge, coarse away. Add "
+        "regions, then edit Fine Size / Refine Radius inline.</small>")
     hint.set_halign(Gtk.Align.START)
     hint.set_line_wrap(True)
     refine_page.pack_start(hint, False, False, 0)
 
-    # scope, vertex_pid, fine, radius (all str), vertex_label
-    store = Gtk.ListStore(str, str, str, str, str)
+    # scope, anchor pid, fine, radius, label, kind (all str)
+    store = Gtk.ListStore(str, str, str, str, str, str)
     for r in refinements:
+        is_edge = bool(r.get('edge_pid'))
         store.append([
-            r.get('scope', ''), r.get('vertex_pid', ''),
+            r.get('scope', ''),
+            r.get('edge_pid') or r.get('vertex_pid', ''),
             f"{float(r.get('fine_size', 0.5)):g}",
             f"{float(r.get('radius', 2.0)):g}",
-            r.get('vertex_label', ''),
+            r.get('edge_label') or r.get('vertex_label', ''),
+            'edge' if is_edge else 'vertex',
         ])
 
     tree = Gtk.TreeView(model=store)
     tree.set_tooltip_text(
-        "Each row refines around one picked vertex. 'local' refines only that "
-        "part; 'contact' refines every part meeting at the vertex.")
+        "Each row refines around one picked vertex or edge. 'local' refines "
+        "only that part; 'contact' refines every part meeting at the anchor "
+        "(an edge refines along its whole length — e.g. a contact line).")
 
     # Track an in-progress cell edit so a click on OK / Add (which doesn't move
     # focus out of the entry, so GTK emits 'editing-canceled' not 'edited') still
@@ -195,7 +204,7 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
 
     for title, col, editable in (
             ("Scope", _COL_SCOPE, False),
-            ("Vertex", _COL_VERTEX, False),
+            ("Anchor", _COL_ANCHOR, False),
             ("Fine Size", _COL_FINE, True),
             ("Refine Radius", _COL_RADIUS, True)):
         renderer = Gtk.CellRendererText()
@@ -222,6 +231,16 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
         "Pick a vertex; refine all parts meeting there")
     add_contact_btn.connect(
         "clicked", lambda *_: dialog.response(RESPONSE_ADD_CONTACT))
+    add_local_edge_btn = Gtk.Button.new_with_label("Add Local Edge…")
+    add_local_edge_btn.set_tooltip_text(
+        "Pick an edge; refine only its part along the whole edge")
+    add_local_edge_btn.connect(
+        "clicked", lambda *_: dialog.response(RESPONSE_ADD_LOCAL_EDGE))
+    add_contact_edge_btn = Gtk.Button.new_with_label("Add Contact Edge…")
+    add_contact_edge_btn.set_tooltip_text(
+        "Pick an edge (e.g. a contact line); refine every part along it")
+    add_contact_edge_btn.connect(
+        "clicked", lambda *_: dialog.response(RESPONSE_ADD_CONTACT_EDGE))
     remove_btn = Gtk.Button.new_with_label("Remove")
 
     def _on_remove(_btn):
@@ -232,6 +251,8 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
     remove_btn.connect("clicked", _on_remove)
     button_row.pack_start(add_local_btn, False, False, 0)
     button_row.pack_start(add_contact_btn, False, False, 0)
+    button_row.pack_start(add_local_edge_btn, False, False, 0)
+    button_row.pack_start(add_contact_edge_btn, False, False, 0)
     button_row.pack_start(remove_btn, False, False, 0)
     refine_page.pack_start(button_row, False, False, 0)
 
@@ -297,11 +318,15 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
             radius = float(row[_COL_RADIUS])
         except (TypeError, ValueError):
             continue
-        regions.append({
-            'scope': row[_COL_SCOPE], 'vertex_pid': row[_COL_VERTEX],
-            'vertex_label': row[_COL_LABEL], 'fine_size': fine,
-            'radius': radius,
-        })
+        region = {'scope': row[_COL_SCOPE], 'fine_size': fine,
+                  'radius': radius}
+        if row[_COL_KIND] == 'edge':
+            region['edge_pid'] = row[_COL_ANCHOR]
+            region['edge_label'] = row[_COL_LABEL]
+        else:
+            region['vertex_pid'] = row[_COL_ANCHOR]
+            region['vertex_label'] = row[_COL_LABEL]
+        regions.append(region)
 
     values = {
         'mesh_type': mesh_type,
@@ -327,6 +352,12 @@ def ask_mesh_settings(parent, cap_face_pid=None, refinements=None, initial=None)
         return values
     if response == RESPONSE_ADD_CONTACT:
         values['_action'] = 'add_contact'
+        return values
+    if response == RESPONSE_ADD_LOCAL_EDGE:
+        values['_action'] = 'add_local_edge'
+        return values
+    if response == RESPONSE_ADD_CONTACT_EDGE:
+        values['_action'] = 'add_contact_edge'
         return values
     if response != Gtk.ResponseType.OK:
         return None

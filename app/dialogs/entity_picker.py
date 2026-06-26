@@ -22,12 +22,18 @@ as the viewer gains support for them.
 
 from viewer import ModelViewer
 
-# kind -> ModelViewer pick_mode. The viewer supports faces and vertices today;
-# add ``"edge": "edges"`` here once it gains edge picking, and every control
-# that uses pick_entities() gets edge support for free.
+# kind -> ModelViewer pick_mode. Faces, vertices, and edges are all pickable;
+# every control that uses pick_entities() gets each kind for free.
 _PICK_MODES = {
     "face": "faces",
     "vertex": "vertices",
+    "edge": "edges",
+}
+# kind -> the viewer property holding the picks after the window closes.
+_PICK_RESULTS = {
+    "face": "picked_faces",
+    "vertex": "picked_vertices",
+    "edge": "picked_edges",
 }
 
 
@@ -39,8 +45,8 @@ def pick_entities(parent, model_data, kind="face", single=True,
         parent: Parent GTK window (desensitized while the viewer is open), or
             None.
         model_data: The model's CADModelData as a dict (``to_dict()`` output).
-        kind: ``"face"`` or ``"vertex"`` (``"edge"`` once the viewer supports
-            it). Raises ValueError for anything else.
+        kind: ``"face"``, ``"vertex"``, or ``"edge"``. Raises ValueError for
+            anything else.
         single: True returns the last-picked ``(pid, label)`` or None; False
             returns a list of ``(pid, label)``.
         initial: Optional list of ``(pid, label)`` to pre-highlight.
@@ -78,9 +84,7 @@ def pick_entities(parent, model_data, kind="face", single=True,
             parent.set_sensitive(True)
             parent.present()
 
-    picks = list(
-        viewer.picked_vertices if kind == "vertex" else viewer.picked_faces
-    )
+    picks = list(getattr(viewer, _PICK_RESULTS[kind]))
     if single:
         return picks[-1] if picks else None
     return picks

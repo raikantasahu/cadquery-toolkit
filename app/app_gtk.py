@@ -558,6 +558,20 @@ class CadQueryApp(Gtk.Window):
             initial=[current] if current else [],
         )
 
+    def _pick_single_edge(self, current):
+        """Pick ONE anchor edge for local/contact edge refinement.
+
+        Returns (pid, label) or None. ``current`` pre-populates the picker.
+        """
+        model_data = self._current_model_data()
+        if model_data is None:
+            return None
+        return pick_entities(
+            self, model_data, kind="edge", single=True,
+            title="Pick Refinement Edge",
+            initial=[current] if current else [],
+        )
+
     def _on_menu_export(self, menuitem) -> None:
         """Handle Model > Export menu activation"""
         builder = self.active_source
@@ -622,6 +636,17 @@ class CadQueryApp(Gtk.Window):
                     self._refinements.append({
                         'scope': scope, 'vertex_pid': picked[0],
                         'vertex_label': picked[1],
+                        'fine_size': 0.5, 'radius': 2.0,
+                    })
+                state = mesh_config
+                continue
+            if action in ('add_local_edge', 'add_contact_edge'):
+                scope = 'local' if action == 'add_local_edge' else 'contact'
+                picked = self._pick_single_edge(None)
+                if picked is not None:
+                    self._refinements.append({
+                        'scope': scope, 'edge_pid': picked[0],
+                        'edge_label': picked[1],
                         'fine_size': 0.5, 'radius': 2.0,
                     })
                 state = mesh_config
